@@ -1,16 +1,20 @@
-import 'package:flutter/material.dart';
+import 'package:camera/camera.dart' show XFile;
 import 'package:file_picker/file_picker.dart';
-import 'package:image_picker/image_picker.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
-import 'verify_data_screen.dart';
-import 'history_screen.dart';
-import 'camera_screen.dart';
+import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
+
+import '../controllers/applications_controller.dart';
 import '../services/api_service.dart';
 import '../services/auth_service.dart';
-import '../services/theme_service.dart';
-import 'admin_dashboard.dart';
-import 'login_screen.dart';
-import 'package:provider/provider.dart';
+import '../services/realtime_service.dart';
+import '../theme/app_theme.dart';
+import '../widgets/common.dart';
+import 'app_menu.dart';
+import 'camera_screen.dart';
+import 'history_screen.dart';
+import 'result_screen.dart';
+import 'verify_data_screen.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -20,120 +24,53 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
-  PlatformFile? _pickedFile;
-  bool _isLoading = false;
-  String? _errorMessage;
-  bool _serverOnline = false;
+  late final ApplicationsController _apps =
+      ApplicationsController(context.read<RealtimeService>(), pageSize: 5, withStats: true)..load();
+
+  bool _analyzing = false;
+  String? _fileName;
+  String? _error;
 
   @override
-  void initState() {
-    super.initState();
-    _checkServer();
+  void dispose() {
+    _apps.dispose();
+    super.dispose();
   }
 
-  Future<void> _checkServer() async {
-    final online = await ApiService.checkHealth();
-    if (mounted) setState(() => _serverOnline = online);
-  }
-
-  Future<void> _showSourcePicker() async {
-    setState(() => _errorMessage = null);
-
+  // ── Picking a document ─────────────────────────────────────────
+  void _chooseSource() {
+    setState(() => _error = null);
     showModalBottomSheet(
       context: context,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-      ),
-      builder: (BuildContext context) {
-        return SafeArea(
-          child: Padding(
-            padding: const EdgeInsets.symmetric(vertical: 20),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Container(
-                  width: 40,
-                  height: 4,
-                  margin: const EdgeInsets.only(bottom: 20),
-                  decoration: BoxDecoration(
-                    color: Colors.grey[300],
-                    borderRadius: BorderRadius.circular(10),
-                  ),
-                ),
-                const Text(
-                  'Choose Document Source',
-                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-                ),
-                const SizedBox(height: 20),
-                ListTile(
-                  leading: const CircleAvatar(
-                    backgroundColor: Color(0xFFEBF5FF),
-                    child: Icon(Icons.camera_alt_outlined,
-                        color: Color(0xFF1A56DB)),
-                  ),
-                  title: const Text('Camera',
-                      style: TextStyle(fontWeight: FontWeight.w600)),
-                  subtitle: const Text('Take a photo now',
-                      style: TextStyle(color: Colors.grey)),
-                  trailing: const Icon(Icons.chevron_right, color: Colors.grey),
-                  onTap: () async {
-                    Navigator.pop(context);
-                    final XFile? result = await Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                          builder: (context) => const CameraScreen()),
-                    );
-                    if (result != null) {
-                      _handleCameraResult(result);
-                    }
-                  },
-                ),
-                ListTile(
-                  leading: const CircleAvatar(
-                    backgroundColor: Color(0xFFFDE8E8),
-                    child:
-                        Icon(Icons.folder_outlined, color: Color(0xFFF98080)),
-                  ),
-                  title: const Text('Browse Files',
-                      style: TextStyle(fontWeight: FontWeight.w600)),
-                  subtitle: const Text('JPG, PNG, PDF',
-                      style: TextStyle(color: Colors.grey)),
-                  trailing: const Icon(Icons.chevron_right, color: Colors.grey),
-                  onTap: () {
-                    Navigator.pop(context);
-                    _pickFile();
-                  },
-                ),
-              ],
+      showDragHandle: true,
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(8, 0, 8, 16),
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            ListTile(
+              leading: const Icon(Icons.folder_open_rounded),
+              title: const Text('Browse files'),
+              subtitle: const Text('PDF, JPG or PNG — up to 10 MB'),
+              onTap: () {
+                Navigator.pop(ctx);
+                _pickFile();
+              },
             ),
-          ),
-        );
-      },
+            ListTile(
+              leading: const Icon(Icons.photo_camera_outlined),
+              title: const Text('Take a photo'),
+              subtitle: const Text('Capture a salary slip with the camera'),
+              onTap: () async {
+                Navigator.pop(ctx);
+                final XFile? shot = await Navigator.push(
+                    context, MaterialPageRoute(builder: (_) => const CameraScreen()));
+                if (shot != null) _useCameraShot(shot);
+              },
+            ),
+          ]),
+        ),
+      ),
     );
-  }
-
-  Future<void> _handleCameraResult(XFile image) async {
-    try {
-      final bytes = await image.readAsBytes();
-      
-      // Ensure the filename has a valid extension for the backend
-      String fileName = image.name;
-      if (!fileName.contains('.') || fileName.toLowerCase() == 'blob') {
-        fileName = 'camera_capture_${DateTime.now().millisecondsSinceEpoch}.jpg';
-      }
-
-      setState(() {
-        _pickedFile = PlatformFile(
-          name: fileName,
-          size: bytes.length,
-          path: kIsWeb ? null : image.path,
-          bytes: bytes,
-        );
-      });
-      _analyzeRisk();
-    } catch (e) {
-      if (mounted) setState(() => _errorMessage = 'Failed to process camera image: $e');
-    }
   }
 
   Future<void> _pickFile() async {
@@ -142,467 +79,220 @@ class _HomeScreenState extends State<HomeScreen> {
       allowedExtensions: ['pdf', 'jpg', 'jpeg', 'png'],
       withData: true,
     );
-    if (result != null && result.files.isNotEmpty) {
-      if (mounted) setState(() => _pickedFile = result.files.first);
-    }
+    if (result != null && result.files.isNotEmpty) _analyze(result.files.first);
   }
 
-  Future<void> _handleLogout() async {
-    final authService = Provider.of<AuthService>(context, listen: false);
-    await authService.logout();
-    if (mounted) {
-      Navigator.pushAndRemoveUntil(
-        context,
-        MaterialPageRoute(builder: (_) => const LoginScreen()),
-        (route) => false,
-      );
+  Future<void> _useCameraShot(XFile image) async {
+    final bytes = await image.readAsBytes();
+    var name = image.name;
+    if (!name.contains('.') || name.toLowerCase() == 'blob') {
+      name = 'camera_${DateTime.now().millisecondsSinceEpoch}.jpg';
     }
+    _analyze(PlatformFile(
+        name: name, size: bytes.length, bytes: bytes, path: kIsWeb ? null : image.path));
   }
 
-  Future<void> _analyzeRisk() async {
-    if (_pickedFile == null) {
-      setState(() => _errorMessage = 'Please select a document first.');
-      return;
-    }
-
+  Future<void> _analyze(PlatformFile file) async {
     setState(() {
-      _isLoading = true;
-      _errorMessage = null;
+      _analyzing = true;
+      _fileName = file.name;
+      _error = null;
     });
-
     try {
-      final auth = Provider.of<AuthService>(context, listen: false);
-      if (auth.token == null) throw Exception("Session expired. Please login again.");
-
-      final result = await ApiService.analyzeLoan(_pickedFile!, auth.token!);
+      final preview = await ApiService.analyzeDocument(file);
       if (!mounted) return;
-      
       Navigator.push(
-        context,
-        MaterialPageRoute(
-            builder: (_) => VerifyDataScreen(
-              initialResult: result,
-            )),
-      );
+          context, MaterialPageRoute(builder: (_) => VerifyDataScreen(initial: preview)));
     } catch (e) {
-      setState(
-          () => _errorMessage = e.toString().replaceAll('Exception: ', ''));
+      if (mounted) setState(() => _error = e.toString());
     } finally {
-      if (mounted) setState(() => _isLoading = false);
+      if (mounted) setState(() => _analyzing = false);
     }
   }
 
+  void _manualEntry() => Navigator.push(
+      context, MaterialPageRoute(builder: (_) => const VerifyDataScreen()));
+
+  // ── UI ─────────────────────────────────────────────────────────
   @override
   Widget build(BuildContext context) {
-    final themeService = Provider.of<ThemeService>(context);
-    final authService = Provider.of<AuthService>(context);
-    final isDark = themeService.isDarkMode;
-
+    final auth = context.watch<AuthService>();
     return Scaffold(
-      backgroundColor: Theme.of(context).scaffoldBackgroundColor,
       appBar: AppBar(
-        title: const Text('Risk Analyzer'),
-        leading: Builder(
-          builder: (context) => IconButton(
-            icon: const Icon(Icons.menu),
-            onPressed: () => Scaffold.of(context).openDrawer(),
-          ),
-        ),
-        actions: [
-          IconButton(
-            icon: Icon(isDark ? Icons.light_mode : Icons.dark_mode),
-            onPressed: () => themeService.toggleTheme(),
-          ),
-          IconButton(
-            icon: const Icon(Icons.history),
-            onPressed: () => Navigator.push(
-              context,
-              MaterialPageRoute(
-                builder: (_) => authService.isAdmin
-                    ? const AdminDashboard()
-                    : const HistoryScreen(),
-              ),
-            ),
-          ),
-          IconButton(
-            icon: const Icon(Icons.logout),
-            onPressed: _handleLogout,
-          ),
-        ],
+        title: Text('Hi, ${auth.displayName}'),
+        actions: const [LiveIndicator(), AppMenu()],
       ),
-      drawer: Drawer(
-        backgroundColor: isDark ? const Color(0xFF1E293B) : Colors.white,
-        child: Column(
+      body: RefreshIndicator(
+        onRefresh: _apps.load,
+        child: ListView(
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
           children: [
-            UserAccountsDrawerHeader(
-              currentAccountPicture: CircleAvatar(
-                backgroundColor: Colors.white,
-                child: Icon(
-                  authService.isAdmin ? Icons.admin_panel_settings : Icons.person,
-                  color: const Color(0xFF1A56DB),
-                ),
-              ),
-              accountName: Text(authService.isAdmin ? "Bank Officer" : "Applicant"),
-              accountEmail: Text(authService.userEmail ?? ''),
-              decoration: BoxDecoration(
-                color: isDark ? const Color(0xFF0F172A) : const Color(0xFF1A56DB),
-              ),
-            ),
-            if (authService.isAdmin)
-              ListTile(
-                leading: const Icon(Icons.dashboard_outlined),
-                title: const Text('Admin Dashboard'),
-                onTap: () {
-                  Navigator.pop(context);
-                  Navigator.push(
-                    context,
-                    MaterialPageRoute(builder: (_) => const AdminDashboard()),
-                  );
-                },
-              ),
-            ListTile(
-              leading: const Icon(Icons.history_outlined),
-              title: Text(authService.isAdmin ? 'Admin Panel' : 'My History'),
-              onTap: () {
-                Navigator.pop(context);
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    builder: (_) => authService.isAdmin
-                        ? const AdminDashboard()
-                        : const HistoryScreen(),
-                  ),
-                );
-              },
-            ),
-            const Divider(),
-            ListTile(
-              leading: Icon(isDark ? Icons.light_mode_outlined : Icons.dark_mode_outlined),
-              title: Text(isDark ? 'Switch to Light Mode' : 'Switch to Dark Mode'),
-              onTap: () {
-                themeService.toggleTheme();
-              },
-            ),
-            const Spacer(),
-            ListTile(
-              leading: const Icon(Icons.logout, color: Colors.red),
-              title: const Text('Logout', style: TextStyle(color: Colors.red)),
-              onTap: _handleLogout,
-            ),
-            const SizedBox(height: 20),
-          ],
-        ),
-      ),
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(20),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            // ── Server status chip ──────────────────────────────
-            _ServerStatusChip(online: _serverOnline, onRefresh: _checkServer),
-            const SizedBox(height: 20),
-
-            // ── Hero header ──────────────────────────────────────
-            Container(
-              padding: const EdgeInsets.all(24),
-              decoration: BoxDecoration(
-                gradient: const LinearGradient(
-                  colors: [Color(0xFF1A56DB), Color(0xFF0E9F6E)],
-                  begin: Alignment.topLeft,
-                  end: Alignment.bottomRight,
-                ),
-                borderRadius: BorderRadius.circular(20),
-              ),
-              child: const Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text('Loan Risk Assessment',
-                      style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 22,
-                          fontWeight: FontWeight.bold)),
-                  SizedBox(height: 8),
-                  Text(
-                    'Upload a salary slip or bank statement. '
-                    'Our AI will assess the applicant\'s risk in seconds.',
-                    style: TextStyle(
-                        color: Colors.white70, fontSize: 13, height: 1.5),
-                  ),
+            Constrained(
+              child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                _hero(context),
+                const SizedBox(height: 16),
+                if (_error != null) ...[
+                  MessageBanner(_error!),
+                  const SizedBox(height: 16),
                 ],
-              ),
+                ListenableBuilder(listenable: _apps, builder: (context, _) => _statsRow(context)),
+                const SizedBox(height: 20),
+                Row(children: [
+                  const Expanded(
+                    child: Text('Recent applications',
+                        style: TextStyle(fontWeight: FontWeight.w700, fontSize: 16)),
+                  ),
+                  TextButton(
+                    onPressed: () => Navigator.push(
+                        context, MaterialPageRoute(builder: (_) => const HistoryScreen())),
+                    child: const Text('See all'),
+                  ),
+                ]),
+                const SizedBox(height: 6),
+                ListenableBuilder(listenable: _apps, builder: (context, _) => _recent(context)),
+              ]),
             ),
-            const SizedBox(height: 24),
-
-            // ── Steps guide ──────────────────────────────────────
-            const _StepsCard(),
-            const SizedBox(height: 24),
-
-            // ── File picker card ─────────────────────────────────
-            if (!authService.isAdmin) ...[
-              Card(
-                child: Padding(
-                  padding: const EdgeInsets.all(20),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      const Text('Upload Document',
-                          style: TextStyle(
-                              fontWeight: FontWeight.bold, fontSize: 16)),
-                      const SizedBox(height: 6),
-                      const Text('Supported formats: PDF, JPG, PNG',
-                          style:
-                              TextStyle(color: Color(0xFF374151), fontSize: 12)),
-                      const SizedBox(height: 16),
-  
-                      // Drop zone
-                      GestureDetector(
-                        onTap: _showSourcePicker,
-                        child: Container(
-                          height: 130,
-                          decoration: BoxDecoration(
-                            color: isDark ? Colors.white.withOpacity(0.05) : const Color(0xFFF9FAFB),
-                            border: Border.all(
-                              color: _pickedFile != null
-                                  ? const Color(0xFF0E9F6E)
-                                  : const Color(0xFFD1D5DB),
-                              width: 2,
-                            ),
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                          child: _pickedFile == null
-                              ? const Column(
-                                  mainAxisAlignment: MainAxisAlignment.center,
-                                  children: [
-                                    Icon(Icons.cloud_upload_outlined,
-                                        size: 40, color: Color(0xFF4B5563)),
-                                    SizedBox(height: 8),
-                                    Text('Tap to choose a file',
-                                        style: TextStyle(
-                                            color: Color(0xFF374151),
-                                            fontWeight: FontWeight.w500)),
-                                    Text('PDF, JPG or PNG',
-                                        style: TextStyle(
-                                            color: Color(0xFF4B5563),
-                                            fontSize: 12)),
-                                  ],
-                                )
-                              : _FilePreviewTile(
-                                  file: _pickedFile!,
-                                  onRemove: () =>
-                                      setState(() => _pickedFile = null),
-                                ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-              const SizedBox(height: 16),
-  
-              // ── Error message ────────────────────────────────────
-              if (_errorMessage != null)
-                Container(
-                  padding: const EdgeInsets.all(12),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFFFDE8E8),
-                    borderRadius: BorderRadius.circular(10),
-                    border: Border.all(color: const Color(0xFFF98080)),
-                  ),
-                  child: Row(
-                    children: [
-                      const Icon(Icons.error_outline,
-                          color: Color(0xFF9B1C1C), size: 18),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: Text(_errorMessage!,
-                            style: const TextStyle(
-                                color: Color(0xFF9B1C1C), fontSize: 13)),
-                      ),
-                    ],
-                  ),
-                ),
-              const SizedBox(height: 16),
-  
-              // ── Analyse button ───────────────────────────────────
-              SizedBox(
-                height: 52,
-                child: ElevatedButton(
-                  onPressed: _isLoading ? null : _analyzeRisk,
-                  child: _isLoading
-                      ? const SizedBox(
-                          height: 22,
-                          width: 22,
-                          child: CircularProgressIndicator(
-                              color: Colors.white, strokeWidth: 2.5),
-                        )
-                      : const Row(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            Icon(Icons.analytics_outlined),
-                            SizedBox(width: 8),
-                            Text('Analyse Risk',
-                                style: TextStyle(
-                                    fontSize: 16, fontWeight: FontWeight.bold)),
-                          ],
-                        ),
-                ),
-              ),
-            ],
-            const SizedBox(height: 30),
           ],
         ),
       ),
     );
   }
-}
 
-// ── Sub-widgets ─────────────────────────────────────────────────────────────
+  Widget _hero(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(22),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(20),
+        gradient: const LinearGradient(
+          colors: [AppTheme.brand, Color(0xFF0E7C66)],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+      ),
+      child: AnimatedSwitcher(
+        duration: const Duration(milliseconds: 250),
+        child: _analyzing ? _analyzingView() : _startView(),
+      ),
+    );
+  }
 
-class _ServerStatusChip extends StatelessWidget {
-  final bool online;
-  final VoidCallback onRefresh;
-  const _ServerStatusChip({required this.online, required this.onRefresh});
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
+  Widget _startView() {
+    return Column(
+      key: const ValueKey('start'),
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Container(
-          width: 8,
-          height: 8,
-          decoration: BoxDecoration(
-            shape: BoxShape.circle,
-            color: online ? const Color(0xFF0E9F6E) : const Color(0xFFE02424),
-          ),
-        ),
-        const SizedBox(width: 6),
+        const Text('New loan assessment',
+            style: TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.w800)),
+        const SizedBox(height: 6),
         Text(
-          online ? 'Server online' : 'Server offline',
-          style: TextStyle(
-            fontSize: 12,
-            color: online ? const Color(0xFF0E9F6E) : const Color(0xFFE02424),
-            fontWeight: FontWeight.w500,
+          'Upload a salary slip or bank statement. We extract the numbers, '
+          'you check them, and the risk score updates live.',
+          style: TextStyle(color: Colors.white.withValues(alpha: 0.85), height: 1.45),
+        ),
+        const SizedBox(height: 18),
+        Wrap(spacing: 10, runSpacing: 10, children: [
+          FilledButton.icon(
+            style: FilledButton.styleFrom(
+                backgroundColor: Colors.white, foregroundColor: AppTheme.brand),
+            onPressed: _chooseSource,
+            icon: const Icon(Icons.upload_file_rounded),
+            label: const Text('Upload document'),
           ),
-        ),
-        const SizedBox(width: 6),
-        GestureDetector(
-          onTap: onRefresh,
-          child: const Icon(Icons.refresh, size: 14, color: Color(0xFF374151)),
-        ),
+          OutlinedButton.icon(
+            style: OutlinedButton.styleFrom(
+              foregroundColor: Colors.white,
+              side: BorderSide(color: Colors.white.withValues(alpha: 0.6)),
+            ),
+            onPressed: _manualEntry,
+            icon: const Icon(Icons.edit_note_rounded),
+            label: const Text('Enter manually'),
+          ),
+        ]),
       ],
     );
   }
-}
 
-class _StepsCard extends StatelessWidget {
-  const _StepsCard();
-
-  @override
-  Widget build(BuildContext context) {
-    final steps = [
-      ('1', 'Upload document', Icons.upload_file_outlined),
-      ('2', 'AI reads & extracts data', Icons.document_scanner_outlined),
-      ('3', 'ML predicts risk', Icons.psychology_outlined),
-      ('4', 'View decision', Icons.verified_outlined),
-    ];
-    return Card(
-      color: const Color(0xFFF9FAFB),
-      elevation: 0,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(16),
-        side: const BorderSide(color: Color(0xFFE5E7EB)),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text('How it works',
-                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14, color: Color(0xFF111827))),
-            const SizedBox(height: 12),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceAround,
-              children: steps.map((s) => _StepItem(s.$1, s.$2, s.$3)).toList(),
-            ),
-          ],
+  Widget _analyzingView() {
+    return Column(
+      key: const ValueKey('busy'),
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Row(children: [
+          SizedBox(
+              width: 22,
+              height: 22,
+              child: CircularProgressIndicator(strokeWidth: 2.5, color: Colors.white)),
+          SizedBox(width: 14),
+          Text('Analysing document…',
+              style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w700)),
+        ]),
+        const SizedBox(height: 10),
+        Text(_fileName ?? '',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(color: Colors.white.withValues(alpha: 0.85))),
+        const SizedBox(height: 14),
+        ClipRRect(
+          borderRadius: BorderRadius.circular(8),
+          child: LinearProgressIndicator(
+            minHeight: 6,
+            color: Colors.white,
+            backgroundColor: Colors.white.withValues(alpha: 0.2),
+          ),
         ),
-      ),
+        const SizedBox(height: 8),
+        Text('Reading text, extracting figures and scoring risk',
+            style: TextStyle(color: Colors.white.withValues(alpha: 0.7), fontSize: 12)),
+      ],
     );
   }
-}
 
-class _StepItem extends StatelessWidget {
-  final String num;
-  final String label;
-  final IconData icon;
-  const _StepItem(this.num, this.label, this.icon);
-
-  @override
-  Widget build(BuildContext context) {
-    return SizedBox(
-      width: 72,
-      child: Column(
-        children: [
-          CircleAvatar(
-            radius: 22,
-            backgroundColor: const Color(0xFFEBF5FF),
-            child: Icon(icon, color: const Color(0xFF1A56DB), size: 20),
-          ),
-          const SizedBox(height: 6),
-          Text(label,
-              textAlign: TextAlign.center,
-              style: TextStyle(
-                fontSize: 10, 
-                color: Theme.of(context).brightness == Brightness.dark 
-                    ? Colors.grey[400] 
-                    : const Color(0xFF111827)
-              )),
-        ],
-      ),
-    );
-  }
-}
-
-class _FilePreviewTile extends StatelessWidget {
-  final PlatformFile file;
-  final VoidCallback onRemove;
-  const _FilePreviewTile({required this.file, required this.onRemove});
-
-  String get _size {
-    final kb = (file.size / 1024).toStringAsFixed(1);
-    return '$kb KB';
+  Widget _statsRow(BuildContext context) {
+    final s = _apps.stats;
+    final byStatus = (s?['by_status'] as Map?) ?? {};
+    final p = context.palette;
+    final cards = [
+      StatCard(label: 'Applications', value: '${s?['total'] ?? '–'}',
+          icon: Icons.folder_copy_outlined, color: context.colors.primary),
+      StatCard(label: 'Approved', value: '${byStatus['APPROVED'] ?? 0}',
+          icon: Icons.check_circle_outline, color: p.success),
+      StatCard(label: 'In review', value: '${byStatus['PENDING'] ?? 0}',
+          icon: Icons.hourglass_top_rounded, color: p.warning),
+    ];
+    return Row(children: [
+      for (var i = 0; i < cards.length; i++) ...[
+        if (i > 0) const SizedBox(width: 10),
+        Expanded(child: cards[i]),
+      ],
+    ]);
   }
 
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.all(16),
-      child: Row(
-        children: [
-          const Icon(Icons.insert_drive_file,
-              color: Color(0xFF1A56DB), size: 36),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Text(file.name,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(fontWeight: FontWeight.w600)),
-                Text(_size,
-                    style: const TextStyle(
-                        color: Color(0xFF374151), fontSize: 12)),
-              ],
-            ),
+  Widget _recent(BuildContext context) {
+    if (_apps.loading && _apps.items.isEmpty) {
+      return const Padding(
+          padding: EdgeInsets.all(24), child: Center(child: CircularProgressIndicator()));
+    }
+    if (_apps.error != null && _apps.items.isEmpty) {
+      return MessageBanner(_apps.error!, onRetry: _apps.load);
+    }
+    if (_apps.items.isEmpty) {
+      return const EmptyState(
+        icon: Icons.inbox_outlined,
+        title: 'No applications yet',
+        message: 'Your submitted applications and their live status will appear here.',
+      );
+    }
+    return Column(children: [
+      for (final a in _apps.items.take(5))
+        Padding(
+          padding: const EdgeInsets.only(bottom: 10),
+          child: ApplicationTile(
+            app: a,
+            highlight: _apps.highlighted.contains(a.id),
+            onTap: () => Navigator.push(context,
+                MaterialPageRoute(builder: (_) => ResultScreen(applicationId: a.id, initial: a))),
           ),
-          IconButton(
-            icon: const Icon(Icons.close, color: Color(0xFF4B5563)),
-            onPressed: onRemove,
-          ),
-        ],
-      ),
-    );
+        ),
+    ]);
   }
 }

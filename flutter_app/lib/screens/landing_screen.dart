@@ -1,5 +1,8 @@
 import 'package:flutter/material.dart';
+
+import '../theme/app_theme.dart';
 import 'login_screen.dart';
+import 'register_screen.dart';
 
 class LandingScreen extends StatefulWidget {
   const LandingScreen({super.key});
@@ -9,165 +12,131 @@ class LandingScreen extends StatefulWidget {
 }
 
 class _LandingScreenState extends State<LandingScreen> with SingleTickerProviderStateMixin {
-  late AnimationController _controller;
-  late Animation<double> _fadeAnimation;
-  late Animation<double> _scaleAnimation;
-
-  @override
-  void initState() {
-    super.initState();
-    _controller = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 1500),
-    );
-
-    _fadeAnimation = Tween<double>(begin: 0.0, end: 1.0).animate(
-      CurvedAnimation(parent: _controller, curve: Curves.easeIn),
-    );
-
-    _scaleAnimation = Tween<double>(begin: 0.8, end: 1.0).animate(
-      CurvedAnimation(parent: _controller, curve: Curves.elasticOut),
-    );
-
-    _controller.forward();
-  }
+  late final _c = AnimationController(vsync: this, duration: const Duration(milliseconds: 1200))
+    ..forward();
 
   @override
   void dispose() {
-    _controller.dispose();
+    _c.dispose();
     super.dispose();
+  }
+
+  Widget _fadeIn(double start, Widget child) {
+    final a = CurvedAnimation(parent: _c, curve: Interval(start, 1, curve: Curves.easeOutCubic));
+    return FadeTransition(
+      opacity: a,
+      child: SlideTransition(
+        position: Tween(begin: const Offset(0, 0.15), end: Offset.zero).animate(a),
+        child: child,
+      ),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
+    const features = [
+      (Icons.document_scanner_outlined, 'Reads salary slips & statements', 'OCR + NLP extracts the numbers for you'),
+      (Icons.speed_rounded, 'Live risk score', 'Watch the score change as you adjust values'),
+      (Icons.bolt_rounded, 'Real-time decisions', 'Officers review instantly, you are notified live'),
+    ];
+
     return Scaffold(
-      backgroundColor: Colors.white,
       body: Container(
-        width: double.infinity,
-        height: double.infinity,
-        decoration: BoxDecoration(
+        decoration: const BoxDecoration(
           gradient: LinearGradient(
-            colors: [
-              const Color(0xFF1A56DB),
-              const Color(0xFF1A56DB).withOpacity(0.8),
-            ],
-            begin: Alignment.topCenter,
-            end: Alignment.bottomCenter,
+            colors: [Color(0xFF0B1E4B), AppTheme.brand, Color(0xFF0E7C66)],
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
           ),
         ),
-        child: Stack(
-          children: [
-            // Safe area content
-            SafeArea(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  const Spacer(flex: 3),
-                  
-                  // Animated Logo
-                  FadeTransition(
-                    opacity: _fadeAnimation,
-                    child: ScaleTransition(
-                      scale: _scaleAnimation,
-                      child: const Icon(
-                        Icons.analytics_rounded,
-                        size: 80,
+        child: SafeArea(
+          child: Center(
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.all(28),
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 440),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    _fadeIn(0, Align(
+                      alignment: Alignment.centerLeft,
+                      child: Container(
+                        width: 72,
+                        height: 72,
+                        alignment: Alignment.center,
+                        decoration: BoxDecoration(
+                          color: Colors.white.withValues(alpha: 0.15),
+                          borderRadius: BorderRadius.circular(22),
+                        ),
+                        child: const Icon(Icons.analytics_rounded, size: 40, color: Colors.white),
+                      ),
+                    )),
+                    const SizedBox(height: 28),
+                    _fadeIn(0.1, const Text(
+                      'AI Loan Risk\nAnalyzer',
+                      style: TextStyle(
+                        fontSize: 38,
+                        height: 1.1,
+                        fontWeight: FontWeight.w800,
                         color: Colors.white,
                       ),
-                    ),
-                  ),
-                  
-                  const Spacer(flex: 2),
-                  
-                  // App Title
-                  FadeTransition(
-                    opacity: _fadeAnimation,
-                    child: Column(
-                      children: [
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            Icon(Icons.candlestick_chart, color: Colors.blue[100], size: 28),
-                            const SizedBox(width: 12),
-                            const Text(
-                              'FINANCIAL',
-                              style: TextStyle(
-                                fontSize: 26,
-                                fontWeight: FontWeight.bold,
-                                letterSpacing: 5,
-                                color: Colors.white,
-                              ),
+                    )),
+                    const SizedBox(height: 12),
+                    _fadeIn(0.2, Text(
+                      'Upload a document, verify the numbers, and get an explainable '
+                      'credit decision in seconds.',
+                      style: TextStyle(fontSize: 15, height: 1.5,
+                          color: Colors.white.withValues(alpha: 0.8)),
+                    )),
+                    const SizedBox(height: 32),
+                    for (var i = 0; i < features.length; i++)
+                      _fadeIn(0.3 + i * 0.1, Padding(
+                        padding: const EdgeInsets.only(bottom: 14),
+                        child: Row(children: [
+                          Container(
+                            padding: const EdgeInsets.all(10),
+                            decoration: BoxDecoration(
+                              color: Colors.white.withValues(alpha: 0.12),
+                              borderRadius: BorderRadius.circular(12),
                             ),
-                            const SizedBox(width: 12),
-                            Icon(Icons.candlestick_chart, color: Colors.blue[100], size: 28),
-                          ],
-                        ),
-                        const SizedBox(height: 12),
-                        Text(
-                          'RISK ANALYZER',
-                          style: TextStyle(
-                            fontSize: 20,
-                            fontWeight: FontWeight.w800,
-                            letterSpacing: 6,
-                            color: Colors.white.withOpacity(0.9),
+                            child: Icon(features[i].$1, color: Colors.white, size: 22),
                           ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  
-                  const Spacer(flex: 4),
-                  
-                  // Get Started Button
-                  FadeTransition(
-                    opacity: _fadeAnimation,
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 50),
-                      child: InkWell(
-                        onTap: () {
-                          Navigator.pushReplacement(
-                            context,
-                            MaterialPageRoute(
-                              builder: (context) => const LoginScreen(),
-                            ),
-                          );
-                        },
-                        borderRadius: BorderRadius.circular(12),
-                        child: Container(
-                          width: double.infinity,
-                          height: 56,
-                          decoration: BoxDecoration(
-                            borderRadius: BorderRadius.circular(12),
-                            color: Colors.white,
-                            boxShadow: [
-                              BoxShadow(
-                                color: Colors.black.withOpacity(0.1),
-                                blurRadius: 10,
-                                offset: const Offset(0, 4),
-                              ),
-                            ],
+                          const SizedBox(width: 14),
+                          Expanded(
+                            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                              Text(features[i].$2, style: const TextStyle(
+                                  color: Colors.white, fontWeight: FontWeight.w700)),
+                              Text(features[i].$3, style: TextStyle(
+                                  color: Colors.white.withValues(alpha: 0.7), fontSize: 13)),
+                            ]),
                           ),
-                          child: const Center(
-                            child: Text(
-                              'GET STARTED',
-                              style: TextStyle(
-                                color: Color(0xFF1A56DB),
-                                fontSize: 16,
-                                fontWeight: FontWeight.bold,
-                                letterSpacing: 2,
-                              ),
-                            ),
-                          ),
-                        ),
+                        ]),
+                      )),
+                    const SizedBox(height: 28),
+                    _fadeIn(0.6, FilledButton(
+                      style: FilledButton.styleFrom(
+                        backgroundColor: Colors.white,
+                        foregroundColor: AppTheme.brand,
                       ),
-                    ),
-                  ),
-                  
-                  const Spacer(flex: 1),
-                ],
+                      onPressed: () => Navigator.push(
+                          context, MaterialPageRoute(builder: (_) => const LoginScreen())),
+                      child: const Text('Sign in'),
+                    )),
+                    const SizedBox(height: 12),
+                    _fadeIn(0.65, OutlinedButton(
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: Colors.white,
+                        side: BorderSide(color: Colors.white.withValues(alpha: 0.5)),
+                      ),
+                      onPressed: () => Navigator.push(
+                          context, MaterialPageRoute(builder: (_) => const RegisterScreen())),
+                      child: const Text('Create an account'),
+                    )),
+                  ],
+                ),
               ),
             ),
-          ],
+          ),
         ),
       ),
     );

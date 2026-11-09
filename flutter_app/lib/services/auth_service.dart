@@ -1,140 +1,92 @@
-import 'dart:async';
-import 'dart:convert';
-import 'package:http/http.dart' as http;
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'api_service.dart';
+
 class AuthService extends ChangeNotifier {
-  // ── Connection Logic ──────────────────────────────────────────
-  String get _baseUrl {
-    if (kIsWeb) return 'http://127.0.0.1:8000';
-    return 'http://10.0.2.2:8000'; // Default for Android Emulators
-  }
+  String? _token, _role, _email, _fullName;
+  bool _ready = false;
+  bool _busy = false;
 
-  String? _token;
-  String? _userRole;
-  String? _userEmail;
-  bool _isLoading = false;
-
+  bool get ready => _ready;
   bool get isAuthenticated => _token != null;
-  bool get isAdmin => _userRole == "ADMIN";
-  bool get isLoading => _isLoading;
-  String? get userEmail => _userEmail;
+  bool get isAdmin => _role == 'ADMIN';
+  bool get isLoading => _busy;
   String? get token => _token;
+  String? get userEmail => _email;
+  String get displayName =>
+      (_fullName?.isNotEmpty ?? false) ? _fullName! : (_email?.split('@').first ?? 'User');
 
   AuthService() {
+    ApiService.onUnauthorized = () => logout();
     _loadSession();
   }
 
-  Future<bool> register({
-    required String email,
-    required String password,
-    String role = "APPLICANT",
-  }) async {
-    _setLoading(true);
+  Future<void> _loadSession() async {
+    final prefs = await SharedPreferences.getInstance();
+    _token = prefs.getString('token');
+    _role = prefs.getString('role');
+    _email = prefs.getString('email');
+    _fullName = prefs.getString('full_name');
+    ApiService.token = _token;
+    _ready = true;
+    notifyListeners();
+  }
+
+  Future<void> login({required String email, required String password}) async {
+    _setBusy(true);
     try {
-      final url = Uri.parse("$_baseUrl/register");
-      debugPrint("API CALL: POST $url");
+      final data = await ApiService.login(email.trim(), password);
+      _token = data['access_token'];
+      _role = data['role'];
+      _email = data['email'];
+      _fullName = data['full_name'];
+      ApiService.token = _token;
 
-      final response = await http.post(
-        url,
-        headers: {"Content-Type": "application/json"},
-        body: jsonEncode({
-          "email": email,
-          "password": password,
-          "role": role,
-        }),
-      ).timeout(const Duration(seconds: 15));
-
-      debugPrint("API RESPONSE: ${response.statusCode}");
-      if (response.statusCode == 200) {
-        return true;
-      } else {
-        final err = jsonDecode(response.body)['detail'] ?? "Registration failed";
-        throw Exception(err);
-      }
-    } on TimeoutException {
-      debugPrint("AUTH ERROR: Register request timed out");
-      throw Exception(
-          'Cannot connect to server. Please ensure the backend is running and try again.');
-    } catch (e) {
-      debugPrint("AUTH ERROR: $e");
-      rethrow;
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('token', _token!);
+      await prefs.setString('role', _role ?? 'APPLICANT');
+      await prefs.setString('email', _email ?? '');
+      await prefs.setString('full_name', _fullName ?? '');
     } finally {
-      _setLoading(false);
+      _setBusy(false);
     }
   }
 
-  Future<bool> login({required String email, required String password}) async {
-    _setLoading(true);
+  Future<void> register({
+    required String email,
+    required String password,
+    String? fullName,
+    String role = 'APPLICANT',
+    String? inviteCode,
+  }) async {
+    _setBusy(true);
     try {
-      final url = Uri.parse("$_baseUrl/login");
-      debugPrint("API CALL: POST $url");
-
-      final response = await http.post(
-        url,
-        body: {
-          "username": email,
-          "password": password,
-        },
-      ).timeout(const Duration(seconds: 30));
-
-      debugPrint("API RESPONSE: ${response.statusCode}");
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        _token = data['access_token'];
-        _userRole = data['role'];
-        _userEmail = data['email'];
-
-        final prefs = await SharedPreferences.getInstance();
-        await prefs.setString('token', _token!);
-        await prefs.setString('role', _userRole!);
-        await prefs.setString('email', _userEmail!);
-
-        notifyListeners();
-        return true;
-      } else {
-        final err = jsonDecode(response.body)['detail'] ?? "Login failed";
-        throw Exception(err);
-      }
-    } on TimeoutException {
-      debugPrint("AUTH ERROR: Login request timed out");
-      throw Exception('Cannot connect to server. Please ensure the backend is running and try again.');
-    } catch (e) {
-      debugPrint("AUTH ERROR: $e");
-      if (e is Exception) rethrow;
-      throw Exception(e.toString());
+      await ApiService.register({
+        'email': email.trim(),
+        'password': password,
+        'full_name': fullName,
+        'role': role,
+        if (inviteCode != null && inviteCode.isNotEmpty) 'invite_code': inviteCode,
+      });
     } finally {
-      _setLoading(false);
+      _setBusy(false);
     }
   }
 
   Future<void> logout() async {
-    _token = null;
-    _userRole = null;
-    _userEmail = null;
-    _isLoading = false; // Reset loading state
+    if (_token == null) return;
+    _token = _role = _email = _fullName = null;
+    ApiService.token = null;
     final prefs = await SharedPreferences.getInstance();
-    await prefs.clear();
+    for (final k in ['token', 'role', 'email', 'full_name']) {
+      await prefs.remove(k); // keep other prefs such as the theme
+    }
     notifyListeners();
   }
 
-  Future<void> _loadSession() async {
-    _isLoading = true;
-    final prefs = await SharedPreferences.getInstance();
-    _token = prefs.getString('token');
-    _userRole = prefs.getString('role');
-    _userEmail = prefs.getString('email');
-    _isLoading = false;
+  void _setBusy(bool v) {
+    _busy = v;
     notifyListeners();
   }
-
-  void _setLoading(bool value) {
-    _isLoading = value;
-    notifyListeners();
-  }
-
-  Map<String, String> get authHeader => {
-    "Authorization": "Bearer $_token",
-  };
 }

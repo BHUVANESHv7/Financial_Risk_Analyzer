@@ -14,14 +14,20 @@ from PIL import Image
 from pdf2image import convert_from_path
 import pypdf
 
-# Load spaCy English model
-# Run once: python -m spacy download en_core_web_sm
-try:
-    nlp = spacy.load("en_core_web_sm")
-except OSError:
-    raise RuntimeError(
-        "spaCy model not found. Run: python -m spacy download en_core_web_sm"
-    )
+# spaCy English model is loaded lazily on first use.
+# Install once with: python -m spacy download en_core_web_sm
+_nlp = None
+
+
+def _get_nlp():
+    global _nlp
+    if _nlp is None:
+        try:
+            _nlp = spacy.load("en_core_web_sm")
+        except OSError:
+            print("[NLP] spaCy model missing — run: python -m spacy download en_core_web_sm")
+            _nlp = False
+    return _nlp or None
 
 
 # ── Main entry point ──────────────────────────────────────────────────────────
@@ -32,10 +38,15 @@ def extract_features(file_path: str) -> dict:
     Returns a dict of financial features for the ML model.
     """
     raw_text = _file_to_text(file_path)
-    doc      = nlp(raw_text)
+    return extract_from_text(raw_text)
+
+
+def extract_from_text(raw_text: str) -> dict:
+    nlp = _get_nlp()
+    doc = nlp(raw_text[:100_000]) if nlp else None
 
     features = {
-        "applicant_name":   _extract_name(doc),
+        "applicant_name":   _extract_labelled_name(raw_text) or _extract_name(doc),
         "monthly_income":   _extract_number(raw_text, [
                                 r"net\s+pay[^\d]*?([\d,.]+)",
                                 r"take\s+home[^\d]*?([\d,.]+)",
@@ -181,14 +192,26 @@ def _extract_number(text: str, patterns: list, get_max: bool = False, exclude_ye
     return 0.0
 
 
+def _extract_labelled_name(text: str) -> str:
+    """Look for an explicit label such as 'Employee Name: Ravi Kumar'."""
+    m = re.search(
+        r"(?i:(?:employee|applicant|customer|account\s+holder)?\s*name)[ \t]*[:\-][ \t]*"
+        r"([A-Z][A-Za-z.]+(?:[ \t]+[A-Z][A-Za-z.]+){0,3})",
+        text,
+    )
+    return m.group(1).strip() if m else ""
+
+
 def _extract_name(doc) -> str:
     """Use spaCy NER to find a PERSON entity as applicant name."""
+    if doc is None:
+        return "Unknown Applicant"
     # Common words in salary slips that AI misidentifies as names
     blacklist = ["deductions", "amount", "employee", "earnings", "salary", "slip", "details", "designation", "technology"]
     
     for ent in doc.ents:
         if ent.label_ == "PERSON":
-            text = ent.text.strip()
+            text = ent.text.strip().splitlines()[0].strip()
             text_lower = text.lower()
             
             # Simple heuristic: ignore common table headers misidentified as people

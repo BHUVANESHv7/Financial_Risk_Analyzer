@@ -2,359 +2,449 @@
 main.py
 ───────
 FastAPI Backend — AI Financial Risk Analyzer
-Receives uploaded document from Flutter, runs NLP + ML + Fraud + Compliance,
-returns a complete JSON risk report.
+
+Flow:
+  1. POST /analyze-loan      upload → OCR/NLP → preview report (not saved)
+  2. POST /recalculate       live "what-if" while the user edits values (not saved)
+  3. POST /applications      submit verified values → saved + pushed live
+  4. PATCH /applications/id/review   bank officer approves / rejects → pushed live
+  5. WS   /ws                real-time events (first message: {"type":"auth","token":…})
 
 Run with:
     uvicorn main:app --reload --host 0.0.0.0 --port 8000
 """
 
+import asyncio
+import json
 import os
-import shutil
-import uuid
-from datetime import timedelta
+import tempfile
+from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
+from typing import Optional
 
-from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, status
+from fastapi import (
+    Depends, FastAPI, File, HTTPException, Query, UploadFile, WebSocket,
+    WebSocketDisconnect, status,
+)
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordRequestForm
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
-from nlp_parser import extract_features
-from risk_model import predict_risk
-from fraud_detector import check_fraud
-from compliance_checker import check_compliance
-from bias_monitor import check_bias
-from database import init_db, get_db, LoanAnalysis, User
+import config
 from auth import (
-    get_current_user,
-    get_password_hash,
-    verify_password,
-    create_access_token,
-    ACCESS_TOKEN_EXPIRE_MINUTES,
+    create_access_token, get_current_user, get_password_hash, require_admin,
+    user_from_token, verify_password,
 )
+from database import LoanAnalysis, SessionLocal, User, engine, get_db, init_db
+from pipeline import assess
+from realtime import Client, manager
+from risk_model import MODEL_VERSION, get_model
+from schemas import FeaturesIn, RegisterIn, ReviewIn
 
-# ── App setup ─────────────────────────────────────────────────────────────────
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    init_db()
+    await run_in_threadpool(get_model)  # warm the model so the first request is fast
+    yield
+
 
 app = FastAPI(
     title="AI Financial Risk Analyzer",
-    description="Loan risk assessment API using NLP + ML",
-    version="1.0.0",
+    description="Loan risk assessment API using NLP + ML, with live updates",
+    version="2.0.0",
+    lifespan=lifespan,
 )
 
-# ── CORS — allow Flutter app to call this API ─────────────────────────────────
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],   # In production: set to your Flutter app's domain
+    allow_origins=config.CORS_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-UPLOAD_DIR = "uploads"
-os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+def _now():
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
-# ── Startup ───────────────────────────────────────────────────────────────────
-
-@app.on_event("startup")
-def startup_event():
-    init_db()
+def _iso(dt: Optional[datetime]) -> Optional[str]:
+    # Stored as naive UTC; mark it so clients convert to local time correctly.
+    return dt.replace(tzinfo=timezone.utc).isoformat() if dt else None
 
 
-# ── Health check ──────────────────────────────────────────────────────────────
+# ── Serialisation ─────────────────────────────────────────────────────────────
+
+def serialize(r: LoanAnalysis, full: bool = False) -> dict:
+    out = {
+        "id": r.id,
+        "user_id": r.user_id,
+        "applicant_email": r.owner.email if r.owner else None,
+        "applicant_name": r.applicant_name,
+        "timestamp": _iso(r.timestamp),
+        "risk_level": r.risk_level,
+        "risk_score": r.risk_score,
+        "decision": r.decision,
+        "status": r.status or "PENDING",
+        "confidence": r.confidence,
+        "monthly_income": r.monthly_income,
+        "loan_amount": r.loan_amount,
+        "credit_score": r.credit_score,
+        "existing_emis": r.existing_emis,
+        "loan_category": r.loan_category,
+        "tenure_months": r.tenure_months,
+        "fraud_flag": r.fraud_flag,
+        "compliant": r.compliant,
+        "reviewer_notes": r.reviewer_notes,
+        "reviewer_email": r.reviewer.email if r.reviewer else None,
+        "reviewed_at": _iso(r.reviewed_at),
+    }
+    if full:
+        out["report_summary"] = r.report_summary
+        out.update(r.details or {})
+    return out
+
+
+def _status_for(decision: str) -> str:
+    return {"APPROVE": "APPROVED", "REJECT": "REJECTED"}.get(decision, "PENDING")
+
+
+# ── Health & metadata ─────────────────────────────────────────────────────────
 
 @app.get("/health")
 def health():
-    """Flutter calls this to show the green 'Server online' dot."""
-    return {"status": "online", "service": "AI Loan Risk Analyzer"}
+    return {
+        "status": "online",
+        "service": "AI Loan Risk Analyzer",
+        "database": engine.url.get_backend_name(),
+        "model_version": MODEL_VERSION,
+        "live_connections": manager.count,
+    }
 
 
-# ── History ───────────────────────────────────────────────────────────────────
-
-@app.get("/history")
-def get_history(
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
-    """
-    Retrieve analysis history.
-    - Applicants see only their own history.
-    - Admins see everything.
-    """
-    query = db.query(LoanAnalysis)
-
-    if current_user.role != "ADMIN":
-        query = query.filter(LoanAnalysis.user_id == current_user.id)
-
-    records = query.order_by(LoanAnalysis.timestamp.desc()).limit(50).all()
-
-    result = []
-    for r in records:
-        result.append({
-            "id":               r.id,
-            "applicant_name":   r.applicant_name,
-            "timestamp":        r.timestamp.isoformat() if r.timestamp else None,
-            "risk_level":       r.risk_level,
-            "decision":         r.decision,
-            "confidence":       r.confidence,
-            "monthly_income":   r.monthly_income,
-            "loan_amount":      r.loan_amount,
-            "credit_score":     r.credit_score,
-            "existing_emis":    r.existing_emis,
-            "fraud_flag":       r.fraud_flag,
-            "compliant":        r.compliant,
-            "report_summary":   r.report_summary,
-        })
-    return result
+@app.get("/meta")
+def meta():
+    return {
+        "loan_categories": config.LOAN_CATEGORIES,
+        "default_interest_rate": config.DEFAULT_INTEREST_RATE,
+        "default_tenure_months": config.DEFAULT_TENURE_MONTHS,
+        "max_upload_mb": config.MAX_UPLOAD_MB,
+        "officer_signup_enabled": bool(config.ADMIN_INVITE_CODE),
+    }
 
 
-# ── Auth Endpoints ────────────────────────────────────────────────────────────
+# ── Auth ──────────────────────────────────────────────────────────────────────
 
-@app.post("/register")
-async def register(user_data: dict, db: Session = Depends(get_db)):
-    """Create a new user account."""
-    email    = user_data.get("email")
-    password = user_data.get("password")
-    role_raw = user_data.get("role", "APPLICANT")
-    role     = (role_raw if role_raw else "APPLICANT").upper()
+@app.post("/register", status_code=201)
+def register(body: RegisterIn, db: Session = Depends(get_db)):
+    role = body.role.upper()
+    if role == "ADMIN":
+        if not config.ADMIN_INVITE_CODE or body.invite_code != config.ADMIN_INVITE_CODE:
+            raise HTTPException(403, "A valid officer invite code is required to register as a bank officer")
 
-    if not email or not password:
-        raise HTTPException(status_code=400, detail="Email and password required")
+    if db.query(User).filter(User.email == body.email).first():
+        raise HTTPException(400, "Email already registered")
 
-    existing = db.query(User).filter(User.email == email).first()
-    if existing:
-        raise HTTPException(status_code=400, detail="Email already registered")
-
-    new_user = User(
-        email=email,
-        hashed_password=get_password_hash(password),
+    db.add(User(
+        email=body.email,
+        full_name=(body.full_name or "").strip() or None,
+        hashed_password=get_password_hash(body.password),
         role=role,
-    )
-    db.add(new_user)
+    ))
     db.commit()
     return {"message": "User registered successfully"}
 
 
 @app.post("/login")
-async def login(
-    form_data: OAuth2PasswordRequestForm = Depends(),
-    db: Session = Depends(get_db)
-):
-    """Authenticates user and returns JWT token."""
-    user = db.query(User).filter(User.email == form_data.username).first()
+def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+    email = form_data.username.strip().lower()
+    user = db.query(User).filter(func.lower(User.email) == email).first()
     if not user or not verify_password(form_data.password, user.hashed_password):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect email or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
-
-    access_token = create_access_token(
-        data={"sub": user.email},
-        expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES),
-    )
     return {
-        "access_token": access_token,
-        "token_type":   "bearer",
-        "role":         user.role,
-        "email":        user.email,
+        "access_token": create_access_token({"sub": user.email}),
+        "token_type": "bearer",
+        "role": user.role,
+        "email": user.email,
+        "full_name": user.full_name,
     }
 
 
-# ── Recalculate ───────────────────────────────────────────────────────────────
+@app.get("/me")
+def me(user: User = Depends(get_current_user)):
+    return {"id": user.id, "email": user.email, "full_name": user.full_name, "role": user.role}
 
-@app.post("/recalculate")
-async def recalculate(features: dict):
-    """
-    Receives (possibly modified) features.
-    Returns full risk assessment JSON without re-running NLP.
-    """
+
+# ── Analysis ──────────────────────────────────────────────────────────────────
+
+async def _save_upload(file: UploadFile) -> str:
+    ext = os.path.splitext(file.filename or "")[1].lower()
+    if ext not in config.ALLOWED_EXTENSIONS:
+        raise HTTPException(400, f"Unsupported file type '{ext}'. Upload PDF, JPG, or PNG.")
+
+    limit = config.MAX_UPLOAD_MB * 1024 * 1024
+    fd, path = tempfile.mkstemp(suffix=ext)
+    size = 0
     try:
-        print("[API] Recalculating risk...")
-        risk_result  = predict_risk(features)
-        fraud_result = check_fraud(features)
-        compliance   = check_compliance(risk_result, features)
-        bias_report  = check_bias(features, risk_result)
+        with os.fdopen(fd, "wb") as out:
+            while chunk := await file.read(1024 * 1024):
+                size += len(chunk)
+                if size > limit:
+                    raise HTTPException(413, f"File is larger than {config.MAX_UPLOAD_MB} MB")
+                out.write(chunk)
+    except Exception:
+        os.remove(path)
+        raise
+    if size == 0:
+        os.remove(path)
+        raise HTTPException(400, "The uploaded file is empty")
+    return path
 
-        final_decision = risk_result["decision"]
-        if fraud_result["fraud_flag"]:
-            final_decision = "REJECT"
-        elif not compliance["compliant"] and risk_result["risk_level"] != "LOW":
-            if final_decision == "APPROVE":
-                final_decision = "MANUAL REVIEW"
-
-        summary = _build_summary(
-            features, risk_result, fraud_result, compliance, final_decision
-        )
-
-        return {
-            "applicant_name": features.get("applicant_name", "Unknown"),
-            "risk_level":     risk_result["risk_level"],
-            "decision":       final_decision,
-            "confidence":     risk_result["confidence"],
-            "monthly_income": features.get("monthly_income", 0),
-            "loan_amount":    features.get("loan_amount", 0),
-            "existing_emis":  features.get("existing_emis", 0),
-            "fraud_flag":     fraud_result["fraud_flag"],
-            "fraud_reasons":  fraud_result["fraud_reasons"],
-            "compliant":      compliance["compliant"],
-            "violations":     compliance["violations"],
-            "bias_report":    bias_report,
-            "report_summary": summary + f" (Bias Status: {'PASS' if not bias_report['bias_detected'] else 'WARNING'})",
-            "features":       features,
-        }
-    except Exception as e:
-        print(f"[API] Recalculate Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-# ── Analyze Loan ──────────────────────────────────────────────────────────────
 
 @app.post("/analyze-loan")
-async def analyze_loan(
-    file: UploadFile = File(...),
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
-    """
-    Accepts a PDF or image file.
-    Returns full risk assessment JSON including features for verification.
-    """
-
-    # ── Step 1: Validate file type ────────────────────────────────
-    allowed = {".pdf", ".jpg", ".jpeg", ".png"}
-    ext = os.path.splitext(file.filename)[1].lower()
-    if ext not in allowed:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unsupported file type '{ext}'. Upload PDF, JPG, or PNG.",
-        )
-
-    # ── Step 2: Save file temporarily ─────────────────────────────
-    temp_name = f"{uuid.uuid4().hex}{ext}"
-    temp_path = os.path.join(UPLOAD_DIR, temp_name)
-
+async def analyze_loan(file: UploadFile = File(...), _: User = Depends(get_current_user)):
+    """Extract features from a document and return a preview report (not saved)."""
+    path = await _save_upload(file)
     try:
-        with open(temp_path, "wb") as f:
-            shutil.copyfileobj(file.file, f)
-
-        # ── Step 3: NLP ───────────────────────────────────────────
-        print(f"[API] Running NLP on {file.filename}...")
-        features = extract_features(temp_path)
-        print(f"[API] Extracted features: {features}")
-
-        # ── Step 4: ML risk prediction ────────────────────────────
-        print("[API] Running ML risk prediction...")
-        risk_result = predict_risk(features)
-        print(f"[API] Risk result: {risk_result}")
-
-        # ── Step 5: Fraud detection ───────────────────────────────
-        print("[API] Running fraud detection...")
-        fraud_result = check_fraud(features)
-        print(f"[API] Fraud result: {fraud_result}")
-
-        # ── Step 6: Compliance check ──────────────────────────────
-        print("[API] Running compliance check...")
-        compliance = check_compliance(risk_result, features)
-        print(f"[API] Compliance: {compliance}")
-
-        # ── Step 6.1: Bias Monitoring ─────────────────────────────
-        print("[API] Running bias monitoring...")
-        bias_report = check_bias(features, risk_result)
-        print(f"[API] Bias Report: {bias_report}")
-
-        # ── Step 7: Final Decision Logic ──────────────────────────
-        final_decision = risk_result["decision"]
-
-        if fraud_result["fraud_flag"]:
-            final_decision = "REJECT"
-        elif not compliance["compliant"] and risk_result["risk_level"] != "LOW":
-            if final_decision == "APPROVE":
-                final_decision = "MANUAL REVIEW"
-
-        # ── Step 8: Build report summary ──────────────────────────
-        summary = _build_summary(
-            features, risk_result, fraud_result, compliance, final_decision
-        )
-
-        # ── Step 9: Persist to DB ─────────────────────────────────
-        try:
-            record = LoanAnalysis(
-                user_id=        current_user.id,
-                applicant_name= features["applicant_name"],
-                monthly_income= features["monthly_income"],
-                loan_amount=    features["loan_amount"],
-                credit_score=   int(features["credit_score"]),
-                existing_emis=  features["existing_emis"],
-                risk_level=     risk_result["risk_level"],
-                decision=       final_decision,
-                confidence=     risk_result["confidence"],
-                fraud_flag=     fraud_result["fraud_flag"],
-                compliant=      compliance["compliant"],
-                report_summary= summary,
-            )
-            db.add(record)
-            db.commit()
-            print("[DB] ✅ Analysis saved to MySQL.")
-        except Exception as db_err:
-            print(f"[DB] ❌ Error saving to DB: {db_err}")
-
-        # ── Step 10: Return response ──────────────────────────────
-        return {
-            "applicant_name": features["applicant_name"],
-            "risk_level":     risk_result["risk_level"],
-            "decision":       final_decision,
-            "confidence":     risk_result["confidence"],
-            "monthly_income": features["monthly_income"],
-            "loan_amount":    features["loan_amount"],
-            "existing_emis":  features["existing_emis"],
-            "fraud_flag":     fraud_result["fraud_flag"],
-            "fraud_reasons":  fraud_result["fraud_reasons"],
-            "compliant":      compliance["compliant"],
-            "violations":     compliance["violations"],
-            "bias_report":    bias_report,
-            "report_summary": summary + f" (Bias Status: {'PASS' if not bias_report['bias_detected'] else 'WARNING'})",
-            "features":       features,
-        }
-
-    except Exception as e:
-        print(f"[API] Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
+        from nlp_parser import extract_features  # heavy import (spaCy/OCR) — load on demand
+        features = await run_in_threadpool(extract_features, path)
+    except HTTPException:
+        raise
+    except RuntimeError as e:  # missing OCR tools etc. — message is user-friendly
+        raise HTTPException(422, str(e))
+    except Exception as e:  # noqa: BLE001
+        print(f"[API] Extraction error: {e}")
+        raise HTTPException(422, "Could not read this document. Try a clearer scan or a digital PDF.")
     finally:
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
+        if os.path.exists(path):
+            os.remove(path)
+
+    features["source_file"] = file.filename
+    features.setdefault("tenure_months", config.DEFAULT_TENURE_MONTHS)
+    features.setdefault("interest_rate", config.DEFAULT_INTEREST_RATE)
+    features.setdefault("loan_category", "Personal")
+    return await run_in_threadpool(assess, features)
 
 
-# ── Helper ────────────────────────────────────────────────────────────────────
+@app.post("/recalculate")
+async def recalculate(body: FeaturesIn, _: User = Depends(get_current_user)):
+    """Live what-if scoring. Fast and side-effect free."""
+    return await run_in_threadpool(assess, body.model_dump())
 
-def _build_summary(features, risk, fraud, compliance, decision) -> str:
-    income = features.get("monthly_income", 0)
-    loan   = features.get("loan_amount", 0)
-    credit = features.get("credit_score", 0)
-    years  = features.get("employment_years", 0)
 
-    parts = [
-        f"Applicant earns ₹{income:,.0f}/month with {years:.0f} years of employment.",
-        f"Requested loan amount: ₹{loan:,.0f}.",
-        f"Credit score: {credit:.0f}.",
-        f"Risk level assessed as {risk['risk_level']} "
-        f"(confidence: {risk['confidence']*100:.1f}%).",
-    ]
+@app.post("/applications", status_code=201)
+async def submit_application(
+    body: FeaturesIn,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Score the verified values, save them, and notify officers live."""
+    report = await run_in_threadpool(assess, body.model_dump())
+    f = report["features"]
 
-    if fraud["fraud_flag"]:
-        parts.append(
-            "FRAUD ALERT: Suspicious patterns detected — " +
-            "; ".join(fraud["fraud_reasons"]) + "."
+    record = LoanAnalysis(
+        user_id=user.id,
+        applicant_name=report["applicant_name"],
+        monthly_income=f["monthly_income"],
+        loan_amount=f["loan_amount"],
+        credit_score=int(f["credit_score"]),
+        existing_emis=f["existing_emis"],
+        employment_years=f["employment_years"],
+        num_dependents=int(f["num_dependents"]),
+        loan_category=f.get("loan_category"),
+        tenure_months=f.get("tenure_months"),
+        interest_rate=f.get("interest_rate"),
+        source_file=f.get("source_file"),
+        risk_level=report["risk_level"],
+        risk_score=report["risk_score"],
+        decision=report["decision"],
+        confidence=report["confidence"],
+        fraud_flag=report["fraud_flag"],
+        compliant=report["compliant"],
+        report_summary=report["report_summary"],
+        status=_status_for(report["decision"]),
+        details={k: report[k] for k in (
+            "probabilities", "factors", "ratios", "fraud_score", "fraud_reasons",
+            "fraud_warnings", "violations", "compliance_checks", "bias_report", "features",
+        )},
+    )
+    db.add(record)
+    db.commit()
+    db.refresh(record)
+
+    data = serialize(record, full=True)
+    await manager.notify_application("application.created", serialize(record))
+    return data
+
+
+def _scoped(db: Session, user: User):
+    q = db.query(LoanAnalysis)
+    if user.role != "ADMIN":
+        q = q.filter(LoanAnalysis.user_id == user.id)
+    return q
+
+
+@app.get("/applications")
+def list_applications(
+    status_: Optional[str] = Query(None, alias="status"),
+    risk: Optional[str] = None,
+    q: Optional[str] = None,
+    fraud: Optional[bool] = None,
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    query = _scoped(db, user)
+    if status_:
+        query = query.filter(LoanAnalysis.status == status_.upper())
+    if risk:
+        query = query.filter(LoanAnalysis.risk_level == risk.upper())
+    if fraud is not None:
+        query = query.filter(LoanAnalysis.fraud_flag == fraud)
+    if q:
+        like = f"%{q.strip()}%"
+        query = query.outerjoin(User, LoanAnalysis.user_id == User.id).filter(
+            or_(LoanAnalysis.applicant_name.ilike(like), User.email.ilike(like))
         )
-    else:
-        parts.append("No fraud indicators found.")
+    total = query.count()
+    rows = query.order_by(LoanAnalysis.timestamp.desc(), LoanAnalysis.id.desc()) \
+        .offset(offset).limit(limit).all()
+    return {"total": total, "items": [serialize(r) for r in rows]}
 
-    if not compliance["compliant"]:
-        parts.append(
-            "Compliance issues: " + "; ".join(compliance["violations"]) + "."
-        )
-    else:
-        parts.append("Application is regulatory compliant.")
 
-    parts.append(f"Final decision: {decision}.")
-    return " ".join(parts)
+@app.get("/history")
+def history(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """Backwards-compatible alias: latest 50 applications as a plain list."""
+    rows = _scoped(db, user).order_by(LoanAnalysis.timestamp.desc()).limit(50).all()
+    return [serialize(r, full=True) for r in rows]
+
+
+def _get_owned(app_id: int, db: Session, user: User) -> LoanAnalysis:
+    record = db.get(LoanAnalysis, app_id)
+    if not record or (user.role != "ADMIN" and record.user_id != user.id):
+        raise HTTPException(404, "Application not found")
+    return record
+
+
+@app.get("/applications/{app_id}")
+def get_application(app_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    return serialize(_get_owned(app_id, db, user), full=True)
+
+
+@app.patch("/applications/{app_id}/review")
+async def review_application(
+    app_id: int,
+    body: ReviewIn,
+    db: Session = Depends(get_db),
+    officer: User = Depends(require_admin),
+):
+    record = _get_owned(app_id, db, officer)
+    record.status = body.status
+    record.reviewer_notes = (body.notes or "").strip() or None
+    record.reviewer_id = officer.id
+    record.reviewed_at = _now()
+    db.commit()
+    db.refresh(record)
+
+    await manager.notify_application("application.updated", serialize(record))
+    return serialize(record, full=True)
+
+
+# ── Stats ─────────────────────────────────────────────────────────────────────
+
+@app.get("/stats")
+def stats(days: int = Query(14, ge=1, le=90), db: Session = Depends(get_db),
+          user: User = Depends(get_current_user)):
+    base = _scoped(db, user)
+
+    def grouped(col):
+        rows = base.with_entities(col, func.count()).group_by(col).all()
+        return {(k or "UNKNOWN"): n for k, n in rows}
+
+    total = base.count()
+    by_status = grouped(LoanAnalysis.status)
+    agg = base.with_entities(
+        func.avg(LoanAnalysis.risk_score),
+        func.avg(LoanAnalysis.credit_score),
+        func.sum(LoanAnalysis.loan_amount),
+    ).one()
+    fraud = base.filter(LoanAnalysis.fraud_flag.is_(True)).count()
+
+    since = _now() - timedelta(days=days - 1)
+    day = func.date(LoanAnalysis.timestamp)
+    trend_rows = base.filter(LoanAnalysis.timestamp >= since.replace(hour=0, minute=0, second=0)) \
+        .with_entities(day, LoanAnalysis.status, func.count()) \
+        .group_by(day, LoanAnalysis.status).all()
+    trend = {}
+    for i in range(days):
+        d = (since + timedelta(days=i)).date().isoformat()
+        trend[d] = {"date": d, "total": 0, "APPROVED": 0, "REJECTED": 0, "PENDING": 0}
+    for d, st, n in trend_rows:
+        key = str(d)[:10]
+        if key in trend:
+            trend[key]["total"] += n
+            trend[key][st or "PENDING"] = trend[key].get(st or "PENDING", 0) + n
+
+    decided = by_status.get("APPROVED", 0) + by_status.get("REJECTED", 0)
+    return {
+        "total": total,
+        "by_status": by_status,
+        "by_risk": grouped(LoanAnalysis.risk_level),
+        "by_decision": grouped(LoanAnalysis.decision),
+        "by_category": grouped(LoanAnalysis.loan_category),
+        "pending": by_status.get("PENDING", 0),
+        "fraud_alerts": fraud,
+        "approval_rate": round(by_status.get("APPROVED", 0) / decided, 3) if decided else None,
+        "avg_risk_score": round(agg[0], 1) if agg[0] is not None else None,
+        "avg_credit_score": round(agg[1]) if agg[1] is not None else None,
+        "total_requested": agg[2] or 0,
+        "trend": list(trend.values()),
+        **manager.presence(),
+    }
+
+
+# ── WebSocket ─────────────────────────────────────────────────────────────────
+
+@app.websocket("/ws")
+async def websocket_endpoint(ws: WebSocket):
+    """
+    Clients authenticate with their first message: {"type": "auth", "token": "<jwt>"}.
+    (Keeping the token out of the URL keeps it out of server/proxy logs.)
+    """
+    await ws.accept()
+    try:
+        first = await asyncio.wait_for(ws.receive_text(), timeout=10)
+        token = json.loads(first).get("token", "")
+    except Exception:  # noqa: BLE001 — timeout, bad JSON, disconnect
+        token = ""
+
+    db = SessionLocal()
+    try:
+        user = user_from_token(token, db) if token else None
+        identity = (user.id, user.role, user.email) if user else None
+    finally:
+        db.close()
+
+    if identity is None:
+        await ws.close(code=4401)
+        return
+
+    client = Client(ws=ws, user_id=identity[0], role=identity[1], email=identity[2])
+    await manager.connect(client)
+    try:
+        while True:
+            msg = await ws.receive_text()
+            if msg == "ping":
+                async with client.lock:
+                    await ws.send_text('{"type":"pong"}')
+    except WebSocketDisconnect:
+        pass
+    finally:
+        await manager.disconnect(client)

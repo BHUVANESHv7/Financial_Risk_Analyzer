@@ -2,60 +2,47 @@
 fraud_detector.py
 ─────────────────
 Layer 3 — Fraud Detection Module
-Runs simple rule-based + anomaly checks on extracted features
-to flag suspicious loan applications.
+Rule-based anomaly checks on extracted features.
 """
+
+FRAUD_THRESHOLD = 4
 
 
 def check_fraud(features: dict) -> dict:
-    """
-    Takes features dict from nlp_parser.
-    Returns fraud_flag (bool) and reasons list.
-    """
-    flags   = []
-    score   = 0
+    """Returns fraud_flag, fraud_score, fraud_reasons (if flagged) and warnings (always)."""
+    flags = []
+    score = 0
 
-    income  = features.get("monthly_income",   0)
-    loan    = features.get("loan_amount",       0)
-    emis    = features.get("existing_emis",     0)
-    credit  = features.get("credit_score",      0)
-    years   = features.get("employment_years",  0)
-    doc_len = features.get("raw_text_length",   0)
+    income = float(features.get("monthly_income") or 0)
+    loan = float(features.get("loan_amount") or 0)
+    emis = float(features.get("existing_emis") or 0)
+    credit = float(features.get("credit_score") or 0)
+    years = float(features.get("employment_years") or 0)
+    doc_len = features.get("raw_text_length")
 
-    # ── Rule 1: Loan amount suspiciously high vs income ──────────
+    def flag(reason, points):
+        nonlocal score
+        flags.append(reason)
+        score += points
+
     if income > 0 and (loan / income) > 60:
-        flags.append("Loan-to-income ratio extremely high (>60x)")
-        score += 3
-
-    # ── Rule 2: EMI already exceeds income ───────────────────────
+        flag("Loan-to-income ratio extremely high (>60x monthly income)", 3)
     if income > 0 and emis >= income:
-        flags.append("Existing EMIs exceed monthly income")
-        score += 3
-
-    # ── Rule 3: Very high income but very low credit score ───────
+        flag("Existing EMIs exceed monthly income", 3)
     if income > 100000 and credit < 400:
-        flags.append("High income but very low credit score — inconsistent")
-        score += 2
-
-    # ── Rule 4: Suspiciously round numbers ───────────────────────
-    if income > 0 and income % 100000 == 0 and loan % 1000000 == 0:
-        flags.append("Income and loan amounts are suspiciously round")
-        score += 1
-
-    # ── Rule 5: Document too short (possible fake/empty doc) ─────
-    if doc_len < 50:
-        flags.append("Document appears empty or unreadable")
-        score += 2
-
-    # ── Rule 6: Zero employment but high loan request ────────────
+        flag("High income but very low credit score — inconsistent", 2)
+    if income > 0 and income % 100000 == 0 and loan > 0 and loan % 1000000 == 0:
+        flag("Income and loan amounts are suspiciously round", 1)
+    # Only meaningful when the data came from an uploaded document.
+    if doc_len is not None and doc_len < 50:
+        flag("Document appears empty or unreadable", 2)
     if years == 0 and loan > 500000:
-        flags.append("No employment history with large loan request")
-        score += 2
+        flag("No employment history with large loan request", 2)
 
-    is_fraud = score >= 4
-
+    is_fraud = score >= FRAUD_THRESHOLD
     return {
         "fraud_flag": is_fraud,
         "fraud_score": score,
         "fraud_reasons": flags if is_fraud else [],
+        "warnings": flags,
     }

@@ -1,12 +1,16 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import 'home_screen.dart';
-import '../services/api_service.dart';
-import '../services/auth_service.dart';
-import '../services/theme_service.dart';
-import '../models/risk_result.dart';
-import 'result_screen.dart';
 
+import '../controllers/applications_controller.dart';
+import '../services/realtime_service.dart';
+import '../theme/app_theme.dart';
+import '../utils/format.dart';
+import '../widgets/applications_list.dart';
+import '../widgets/common.dart';
+import '../widgets/trend_chart.dart';
+import 'app_menu.dart';
+
+/// Bank officer dashboard: live KPIs, trend, risk mix and the review queue.
 class AdminDashboard extends StatefulWidget {
   const AdminDashboard({super.key});
 
@@ -15,196 +19,193 @@ class AdminDashboard extends StatefulWidget {
 }
 
 class _AdminDashboardState extends State<AdminDashboard> {
-  List<Map<String, dynamic>> _applications = [];
-  bool _isLoading = true;
-  String? _error;
+  late final ApplicationsController _c = ApplicationsController(
+    context.read<RealtimeService>(),
+    withStats: true,
+  )
+    ..status = 'PENDING' // open on the review queue
+    ..load();
 
   @override
-  void initState() {
-    super.initState();
-    _fetchApplications();
-  }
-
-  Future<void> _fetchApplications() async {
-    final auth = Provider.of<AuthService>(context, listen: false);
-    try {
-      final data = await ApiService.getHistory(auth.token!);
-      setState(() {
-        _applications = data;
-        _isLoading = false;
-      });
-    } catch (e) {
-      setState(() {
-        _error = e.toString();
-        _isLoading = false;
-      });
-    }
+  void dispose() {
+    _c.dispose();
+    super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    final theme = Provider.of<ThemeService>(context);
-    final isDark = theme.isDarkMode;
-
+    final rt = context.watch<RealtimeService>();
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Admin Review Panel'),
-        leading: IconButton(
-          icon: const Icon(Icons.home),
-          onPressed: () => Navigator.pushReplacement(
-            context,
-            MaterialPageRoute(builder: (_) => const HomeScreen()),
-          ),
-        ),
+        title: const Text('Officer dashboard'),
         actions: [
-          IconButton(
-            icon: const Icon(Icons.refresh),
-            onPressed: () {
-              setState(() => _isLoading = true);
-              _fetchApplications();
-            },
-          ),
-          IconButton(
-            icon: const Icon(Icons.logout),
-            onPressed: () async {
-              await Provider.of<AuthService>(context, listen: false).logout();
-              if (mounted) {
-                Navigator.of(context).pushNamedAndRemoveUntil('/', (route) => false);
-              }
-            },
-          ),
-        ],
-      ),
-      body: _isLoading
-          ? const Center(child: CircularProgressIndicator())
-          : _error != null
-              ? Center(child: Text('Error: $_error', style: const TextStyle(color: Colors.red)))
-              : _applications.isEmpty
-                  ? const Center(child: Text('No applications to review.'))
-                  : Column(
-                      children: [
-                        _buildStatsHeader(),
-                        Expanded(child: _buildApplicationsList(isDark)),
-                      ],
-                    ),
-    );
-  }
-
-  Widget _buildStatsHeader() {
-    final manualCount = _applications.where((a) => a['decision'] == 'MANUAL REVIEW').length;
-    final fraudCount = _applications.where((a) => a['fraud_flag'] == true).length;
-
-    return Container(
-      padding: const EdgeInsets.all(20),
-      color: Provider.of<ThemeService>(context).isDarkMode ? const Color(0xFF1E293B) : const Color(0xFFF1F5F9),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceAround,
-        children: [
-          _StatCard(label: 'Total', value: _applications.length.toString(), color: Colors.blue),
-          _StatCard(label: 'Pending', value: manualCount.toString(), color: Colors.orange),
-          _StatCard(label: 'Fraud Alert', value: fraudCount.toString(), color: Colors.red),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildApplicationsList(bool isDark) {
-    return ListView.separated(
-      padding: const EdgeInsets.all(16),
-      itemCount: _applications.length,
-      separatorBuilder: (_, __) => const SizedBox(height: 12),
-      itemBuilder: (context, index) {
-        final doc = _applications[index];
-        final name = doc['applicant_name'] ?? 'Anonymous';
-        final risk = doc['risk_level'] ?? 'N/A';
-        final decision = doc['decision'] ?? 'PENDING';
-        final isFraud = doc['fraud_flag'] ?? false;
-
-        return Card(
-          color: isDark ? const Color(0xFF1E293B) : Colors.white,
-          child: InkWell(
-            onTap: () {
-              final result = RiskResult.fromJson(doc);
-              Navigator.push(
-                context,
-                MaterialPageRoute(builder: (_) => ResultScreen(result: result)),
-              );
-            },
-            borderRadius: BorderRadius.circular(12),
-            child: ListTile(
-              leading: CircleAvatar(
-                backgroundColor: isFraud ? Colors.red.withOpacity(0.1) : Colors.green.withOpacity(0.1),
-                child: Icon(
-                  isFraud ? Icons.warning_amber_rounded : Icons.person_outline,
-                  color: isFraud ? Colors.red : Colors.green,
+          if (rt.isLive)
+            Padding(
+              padding: const EdgeInsets.only(right: 4),
+              child: Tooltip(
+                message: 'People connected right now',
+                child: Chip(
+                  avatar: const Icon(Icons.people_alt_outlined, size: 16),
+                  label: Text('${rt.officersOnline} officers · ${rt.applicantsOnline} applicants'),
+                  visualDensity: VisualDensity.compact,
                 ),
               ),
-              title: Text(name, style: const TextStyle(fontWeight: FontWeight.bold)),
-              subtitle: Text('ID: #${doc['id']} • ${doc['timestamp'].substring(0, 10)}'),
-              trailing: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  _StatusBadge(label: risk, color: _getRiskColor(risk)),
-                  const SizedBox(height: 4),
-                  Text(
-                    decision,
-                    style: TextStyle(
-                      fontSize: 10,
-                      fontWeight: FontWeight.bold,
-                      color: _getDecisionColor(decision),
-                    ),
+            ),
+          const LiveIndicator(),
+          const AppMenu(),
+        ],
+      ),
+      body: ListenableBuilder(
+        listenable: _c,
+        builder: (context, _) => RefreshIndicator(
+          onRefresh: _c.load,
+          child: Constrained(
+            maxWidth: 1200,
+            child: CustomScrollView(
+              physics: const AlwaysScrollableScrollPhysics(),
+              slivers: [
+                SliverPadding(
+                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+                  sliver: SliverToBoxAdapter(child: _overview(context)),
+                ),
+                SliverPadding(
+                  padding: const EdgeInsets.fromLTRB(16, 24, 16, 12),
+                  sliver: SliverToBoxAdapter(
+                    child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                      Row(children: [
+                        const Text('Applications',
+                            style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
+                        const SizedBox(width: 8),
+                        Text('${_c.total}', style: TextStyle(color: context.palette.muted)),
+                      ]),
+                      const SizedBox(height: 12),
+                      ApplicationsFilterBar(controller: _c, showSearch: true, showFraud: true),
+                    ]),
                   ),
-                ],
-              ),
+                ),
+                SliverPadding(
+                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 32),
+                  sliver: SliverApplicationsList(
+                    controller: _c,
+                    showApplicant: true,
+                    emptyMessage: 'New applications appear here the moment they are submitted.',
+                  ),
+                ),
+              ],
             ),
           ),
-        );
-      },
+        ),
+      ),
     );
   }
 
-  Color _getRiskColor(String risk) {
-    if (risk == 'LOW') return Colors.green;
-    if (risk == 'HIGH') return Colors.red;
-    return Colors.orange;
-  }
+  Widget _overview(BuildContext context) {
+    final s = _c.stats;
+    final p = context.palette;
+    if (s == null) {
+      return _c.error != null
+          ? MessageBanner(_c.error!, onRetry: _c.load)
+          : const SizedBox(height: 120, child: Center(child: CircularProgressIndicator()));
+    }
+    final approval = s['approval_rate'];
+    final kpis = [
+      StatCard(label: 'Awaiting review', value: '${s['pending']}',
+          icon: Icons.hourglass_top_rounded, color: p.warning),
+      StatCard(label: 'Total applications', value: '${s['total']}',
+          icon: Icons.folder_copy_outlined, color: context.colors.primary),
+      StatCard(label: 'Approval rate', value: approval == null ? '–' : pct(approval as num),
+          icon: Icons.thumb_up_alt_outlined, color: p.success),
+      StatCard(label: 'Fraud alerts', value: '${s['fraud_alerts']}',
+          icon: Icons.gpp_maybe_outlined, color: p.danger),
+      StatCard(label: 'Avg risk score', value: '${s['avg_risk_score'] ?? '–'}',
+          icon: Icons.speed_rounded, color: p.info),
+      StatCard(label: 'Total requested', value: inrCompact((s['total_requested'] as num?) ?? 0),
+          icon: Icons.currency_rupee_rounded, color: p.muted),
+    ];
 
-  Color _getDecisionColor(String decision) {
-    if (decision == 'APPROVE') return Colors.green;
-    if (decision == 'REJECT') return Colors.red;
-    return Colors.orange;
+    return LayoutBuilder(builder: (context, box) {
+      final cols = box.maxWidth >= 1000 ? 6 : (box.maxWidth >= 640 ? 3 : 2);
+      final cardW = (box.maxWidth - (cols - 1) * 10) / cols;
+      final wide = box.maxWidth >= 900;
+
+      final trend = SectionCard(
+        title: 'Last 14 days',
+        icon: Icons.bar_chart_rounded,
+        child: TrendChart(days: (s['trend'] as List).cast<Map<String, dynamic>>()),
+      );
+      final mix = SectionCard(
+        title: 'Risk mix',
+        icon: Icons.donut_small_outlined,
+        child: _RiskMix(byRisk: (s['by_risk'] as Map).cast<String, dynamic>()),
+      );
+
+      return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        Wrap(spacing: 10, runSpacing: 10, children: [
+          for (final k in kpis) SizedBox(width: cardW, child: k),
+        ]),
+        const SizedBox(height: 14),
+        if (wide)
+          IntrinsicHeight(
+            child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+              Expanded(flex: 3, child: trend),
+              const SizedBox(width: 14),
+              Expanded(flex: 2, child: mix),
+            ]),
+          )
+        else ...[
+          trend,
+          const SizedBox(height: 14),
+          mix,
+        ],
+      ]);
+    });
   }
 }
 
-class _StatCard extends StatelessWidget {
-  final String label;
-  final String value;
-  final Color color;
-  const _StatCard({required this.label, required this.value, required this.color});
+class _RiskMix extends StatelessWidget {
+  final Map<String, dynamic> byRisk;
+  const _RiskMix({required this.byRisk});
 
   @override
   Widget build(BuildContext context) {
-    return Column(
-      children: [
-        Text(value, style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: color)),
-        Text(label, style: const TextStyle(fontSize: 12, color: Colors.grey)),
-      ],
-    );
-  }
-}
-
-class _StatusBadge extends StatelessWidget {
-  final String label;
-  final Color color;
-  const _StatusBadge({required this.label, required this.color});
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-      decoration: BoxDecoration(color: color.withOpacity(0.1), borderRadius: BorderRadius.circular(12)),
-      child: Text(label, style: TextStyle(color: color, fontSize: 10, fontWeight: FontWeight.bold)),
-    );
+    final p = context.palette;
+    final rows = [
+      ('Low', (byRisk['LOW'] as int?) ?? 0, p.success),
+      ('Medium', (byRisk['MEDIUM'] as int?) ?? 0, p.warning),
+      ('High', (byRisk['HIGH'] as int?) ?? 0, p.danger),
+    ];
+    final total = rows.fold<int>(0, (s, r) => s + r.$2);
+    return Column(children: [
+      // Stacked proportion bar
+      ClipRRect(
+        borderRadius: BorderRadius.circular(8),
+        child: SizedBox(
+          height: 14,
+          child: total == 0
+              ? Container(color: p.border)
+              : Row(children: [
+                  for (final (_, n, color) in rows)
+                    if (n > 0) Expanded(flex: n, child: Container(color: color)),
+                ]),
+        ),
+      ),
+      const SizedBox(height: 16),
+      for (final (label, n, color) in rows)
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: 6),
+          child: Row(children: [
+            Container(width: 10, height: 10,
+                decoration: BoxDecoration(color: color, borderRadius: BorderRadius.circular(3))),
+            const SizedBox(width: 10),
+            Expanded(child: Text('$label risk')),
+            Text('$n', style: const TextStyle(fontWeight: FontWeight.w700)),
+            SizedBox(
+              width: 52,
+              child: Text(total == 0 ? '' : pct(n / total),
+                  textAlign: TextAlign.right, style: TextStyle(color: p.muted, fontSize: 12)),
+            ),
+          ]),
+        ),
+    ]);
   }
 }

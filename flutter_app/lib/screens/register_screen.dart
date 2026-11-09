@@ -1,7 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+
 import '../services/auth_service.dart';
-import '../services/theme_service.dart';
+import '../theme/app_theme.dart';
+import '../widgets/common.dart';
+import 'login_screen.dart';
 
 class RegisterScreen extends StatefulWidget {
   const RegisterScreen({super.key});
@@ -11,132 +14,136 @@ class RegisterScreen extends StatefulWidget {
 }
 
 class _RegisterScreenState extends State<RegisterScreen> {
-  final _emailController = TextEditingController();
-  final _passwordController = TextEditingController();
-  String _selectedRole = "APPLICANT";
-  final bool _obscurePassword = true;
+  final _form = GlobalKey<FormState>();
+  final _name = TextEditingController();
+  final _email = TextEditingController();
+  final _password = TextEditingController();
+  final _invite = TextEditingController();
+  String _role = 'APPLICANT';
+  String? _error;
 
-  Future<void> _handleRegister() async {
-    final authService = Provider.of<AuthService>(context, listen: false);
+  @override
+  void dispose() {
+    for (final c in [_name, _email, _password, _invite]) {
+      c.dispose();
+    }
+    super.dispose();
+  }
+
+  Future<void> _submit() async {
+    if (!_form.currentState!.validate()) return;
+    setState(() => _error = null);
+    final auth = context.read<AuthService>();
     try {
-      final success = await authService.register(
-        email: _emailController.text.trim(),
-        password: _passwordController.text.trim(),
-        role: _selectedRole,
+      await auth.register(
+        email: _email.text,
+        password: _password.text,
+        fullName: _name.text.trim(),
+        role: _role,
+        inviteCode: _role == 'ADMIN' ? _invite.text.trim() : null,
       );
-      if (success && mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Registration successful! Please login.')),
-        );
-        Navigator.pop(context);
-      }
+      // Sign straight in — AuthGate then opens the right home screen.
+      await auth.login(email: _email.text, password: _password.text);
     } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(e.toString()), backgroundColor: Colors.red),
-        );
-      }
+      if (mounted) setState(() => _error = e.toString());
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    final themeService = Provider.of<ThemeService>(context);
-    final isDark = themeService.isDarkMode;
-
+    final busy = context.watch<AuthService>().isLoading;
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Create Account'),
-        backgroundColor: Colors.transparent,
-        foregroundColor: isDark ? Colors.white : Colors.black87,
-      ),
-      body: Container(
-        decoration: BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-            colors: isDark
-                ? [const Color(0xFF0F172A), const Color(0xFF1E293B)]
-                : [const Color(0xFFEFF6FF), Colors.white],
-          ),
-        ),
-        child: SafeArea(
-          child: Center(
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.symmetric(horizontal: 32.0, vertical: 24.0),
-              child: ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 400),
-                child: Column(
-                  children: [
-                    const Icon(Icons.person_add_rounded, size: 64, color: Color(0xFF1A56DB)),
-                    const SizedBox(height: 24),
-                    
-                    // Role Selection
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 16),
-                      decoration: BoxDecoration(
-                        color: isDark ? Colors.white.withValues(alpha: 0.05) : Colors.grey[100],
-                        borderRadius: BorderRadius.circular(16),
-                      ),
-                      child: DropdownButtonHideUnderline(
-                        child: DropdownButton<String>(
-                          value: _selectedRole,
-                          isExpanded: true,
-                          dropdownColor: isDark ? const Color(0xFF1E293B) : Colors.white,
-                          style: TextStyle(color: isDark ? Colors.white : Colors.black87),
-                          items: const [
-                            DropdownMenuItem(value: "APPLICANT", child: Text("I am an Applicant")),
-                            DropdownMenuItem(value: "ADMIN", child: Text("I am a Bank Officer (Admin)")),
-                          ],
-                          onChanged: (val) => setState(() => _selectedRole = val!),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 24),
-
-                    TextField(
-                      controller: _emailController,
-                      style: TextStyle(color: isDark ? Colors.white : Colors.black87),
-                      decoration: InputDecoration(
-                        labelText: 'Email Address',
-                        labelStyle: TextStyle(color: isDark ? Colors.grey[400] : Colors.grey[600]),
-                        prefixIcon: Icon(Icons.email_outlined, color: isDark ? Colors.grey[400] : Colors.grey[600]),
-                        filled: true,
-                        fillColor: isDark ? Colors.white.withOpacity(0.05) : Colors.grey[100],
-                      ).applyDefaults(Theme.of(context).inputDecorationTheme),
-                    ),
-                    const SizedBox(height: 20),
-
-                    TextField(
-                      controller: _passwordController,
-                      obscureText: _obscurePassword,
-                      style: TextStyle(color: isDark ? Colors.white : Colors.black87),
-                      decoration: InputDecoration(
+      appBar: AppBar(),
+      body: Center(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(24),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 420),
+            child: Form(
+              key: _form,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Text('Create account',
+                      style: context.text.headlineMedium?.copyWith(fontWeight: FontWeight.w800)),
+                  const SizedBox(height: 20),
+                  SegmentedButton<String>(
+                    segments: const [
+                      ButtonSegment(
+                          value: 'APPLICANT',
+                          icon: Icon(Icons.person_outline),
+                          label: Text('Applicant')),
+                      ButtonSegment(
+                          value: 'ADMIN',
+                          icon: Icon(Icons.account_balance_outlined),
+                          label: Text('Bank officer')),
+                    ],
+                    selected: {_role},
+                    onSelectionChanged: (s) => setState(() => _role = s.first),
+                  ),
+                  const SizedBox(height: 20),
+                  TextFormField(
+                    controller: _name,
+                    textCapitalization: TextCapitalization.words,
+                    textInputAction: TextInputAction.next,
+                    decoration: const InputDecoration(
+                        labelText: 'Full name', prefixIcon: Icon(Icons.badge_outlined)),
+                  ),
+                  const SizedBox(height: 14),
+                  TextFormField(
+                    controller: _email,
+                    keyboardType: TextInputType.emailAddress,
+                    textInputAction: TextInputAction.next,
+                    decoration: const InputDecoration(
+                        labelText: 'Email', prefixIcon: Icon(Icons.mail_outline)),
+                    validator: (v) => (v == null || !RegExp(r'^[^@\s]+@[^@\s]+\.[^@\s]+$').hasMatch(v.trim()))
+                        ? 'Enter a valid email'
+                        : null,
+                  ),
+                  const SizedBox(height: 14),
+                  TextFormField(
+                    controller: _password,
+                    obscureText: true,
+                    decoration: const InputDecoration(
                         labelText: 'Password',
-                        labelStyle: TextStyle(color: isDark ? Colors.grey[400] : Colors.grey[600]),
-                        prefixIcon: Icon(Icons.lock_outline, color: isDark ? Colors.grey[400] : Colors.grey[600]),
-                        filled: true,
-                        fillColor: isDark ? Colors.white.withOpacity(0.05) : Colors.grey[100],
-                      ).applyDefaults(Theme.of(context).inputDecorationTheme),
-                    ),
-                    const SizedBox(height: 32),
-
-                    Consumer<AuthService>(
-                      builder: (context, auth, _) {
-                        return SizedBox(
-                          width: double.infinity,
-                          height: 56,
-                          child: ElevatedButton(
-                            onPressed: auth.isLoading ? null : _handleRegister,
-                            child: auth.isLoading
-                                ? const CircularProgressIndicator(color: Colors.white)
-                                : const Text('CREATE ACCOUNT'),
-                          ),
-                        );
-                      },
-                    ),
-                  ],
-                ),
+                        helperText: 'At least 6 characters',
+                        prefixIcon: Icon(Icons.lock_outline)),
+                    validator: (v) => (v == null || v.length < 6) ? 'Use at least 6 characters' : null,
+                  ),
+                  AnimatedSize(
+                    duration: const Duration(milliseconds: 200),
+                    child: _role == 'ADMIN'
+                        ? Padding(
+                            padding: const EdgeInsets.only(top: 14),
+                            child: TextFormField(
+                              controller: _invite,
+                              decoration: const InputDecoration(
+                                labelText: 'Officer invite code',
+                                helperText: 'Provided by your bank administrator',
+                                prefixIcon: Icon(Icons.key_outlined),
+                              ),
+                              validator: (v) =>
+                                  (v == null || v.trim().isEmpty) ? 'Invite code is required' : null,
+                            ),
+                          )
+                        : const SizedBox(width: double.infinity),
+                  ),
+                  const SizedBox(height: 20),
+                  if (_error != null) ...[MessageBanner(_error!), const SizedBox(height: 14)],
+                  FilledButton(
+                    onPressed: busy ? null : _submit,
+                    child: busy
+                        ? const SizedBox(
+                            width: 22, height: 22, child: CircularProgressIndicator(strokeWidth: 2.5))
+                        : const Text('Create account'),
+                  ),
+                  const SizedBox(height: 12),
+                  TextButton(
+                    onPressed: () => Navigator.pushReplacement(
+                        context, MaterialPageRoute(builder: (_) => const LoginScreen())),
+                    child: const Text('Already have an account? Sign in'),
+                  ),
+                ],
               ),
             ),
           ),
