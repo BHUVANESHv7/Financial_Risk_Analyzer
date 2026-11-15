@@ -23,9 +23,10 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import (
-    Depends, FastAPI, File, HTTPException, Query, UploadFile, WebSocket,
+    Depends, FastAPI, File, HTTPException, Query, Request, UploadFile, WebSocket,
     WebSocketDisconnect, status,
 )
+from fastapi.responses import Response
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordRequestForm
@@ -42,6 +43,7 @@ from pipeline import assess
 from realtime import Client, manager
 from risk_model import MODEL_VERSION, get_model, model_report
 from schemas import FeaturesIn, RegisterIn, ReviewIn
+from security import SECURITY_HEADERS, csv_safe, login_limiter, register_limiter
 
 
 @asynccontextmanager
@@ -63,7 +65,20 @@ app.add_middleware(
     allow_origins=config.CORS_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["Content-Disposition", "Retry-After"],  # readable by the web app
 )
+
+
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    response = await call_next(request)
+    for key, value in SECURITY_HEADERS.items():
+        response.headers.setdefault(key, value)
+    return response
+
+
+def _client_ip(request: Request) -> str:
+    return request.client.host if request.client else "unknown"
 
 
 def _now():
@@ -143,8 +158,21 @@ def meta():
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
 
+def _too_many(wait: int):
+    minutes = max(1, round(wait / 60))
+    raise HTTPException(
+        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        detail=f"Too many attempts. Please try again in about {minutes} minute{'s' if minutes > 1 else ''}.",
+        headers={"Retry-After": str(wait)},
+    )
+
+
 @app.post("/register", status_code=201)
-def register(body: RegisterIn, db: Session = Depends(get_db)):
+def register(body: RegisterIn, request: Request, db: Session = Depends(get_db)):
+    ip_key = _client_ip(request)
+    if wait := register_limiter.retry_after(ip_key):
+        _too_many(wait)
+    register_limiter.hit(ip_key)
     role = body.role.upper()
     if role == "ADMIN":
         if not config.ADMIN_INVITE_CODE or body.invite_code != config.ADMIN_INVITE_CODE:
@@ -164,15 +192,22 @@ def register(body: RegisterIn, db: Session = Depends(get_db)):
 
 
 @app.post("/login")
-def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends(),
+          db: Session = Depends(get_db)):
     email = form_data.username.strip().lower()
+    key = f"{email}|{_client_ip(request)}"
+    if wait := login_limiter.retry_after(key):
+        _too_many(wait)
+
     user = db.query(User).filter(func.lower(User.email) == email).first()
     if not user or not verify_password(form_data.password, user.hashed_password):
+        login_limiter.hit(key)  # only failed attempts count
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect email or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
+    login_limiter.reset(key)
     return {
         "access_token": create_access_token({"sub": user.email}),
         "token_type": "bearer",
@@ -251,7 +286,19 @@ async def submit_application(
     user: User = Depends(get_current_user),
 ):
     """Score the verified values, save them, and notify officers live."""
-    report = await run_in_threadpool(assess, body.model_dump())
+    features = body.model_dump()
+    # Server-side velocity signals for fraud detection.
+    since = _now() - timedelta(hours=24)
+    recent = db.query(LoanAnalysis.loan_amount).filter(
+        LoanAnalysis.user_id == user.id, LoanAnalysis.timestamp >= since,
+        or_(LoanAnalysis.status.is_(None), LoanAnalysis.status != "WITHDRAWN"),
+    ).all()
+    features["recent_applications"] = len(recent)
+    features["similar_recent_applications"] = sum(
+        1 for (amount,) in recent
+        if amount and abs(amount - body.loan_amount) <= 0.1 * max(body.loan_amount, 1)
+    )
+    report = await run_in_threadpool(assess, features)
     f = report["features"]
 
     record = LoanAnalysis(
@@ -332,6 +379,48 @@ def history(db: Session = Depends(get_db), user: User = Depends(get_current_user
     return [serialize(r, full=True) for r in rows]
 
 
+EXPORT_COLUMNS = [
+    "id", "timestamp", "applicant_name", "applicant_email", "loan_category", "loan_amount",
+    "monthly_income", "existing_emis", "credit_score", "tenure_months", "risk_level",
+    "risk_score", "decision", "status", "fraud_flag", "compliant", "reviewer_email",
+    "reviewed_at", "reviewer_notes",
+]
+
+
+@app.get("/applications/export")
+def export_applications(
+    status_: Optional[str] = Query(None, alias="status"),
+    risk: Optional[str] = None,
+    fraud: Optional[bool] = None,
+    db: Session = Depends(get_db),
+    officer: User = Depends(require_admin),
+):
+    """CSV of applications matching the filters (officers only)."""
+    import csv
+    import io
+
+    query = _scoped(db, officer)
+    if status_:
+        query = query.filter(LoanAnalysis.status == status_.upper())
+    if risk:
+        query = query.filter(LoanAnalysis.risk_level == risk.upper())
+    if fraud is not None:
+        query = query.filter(LoanAnalysis.fraud_flag == fraud)
+
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(EXPORT_COLUMNS)
+    for r in query.order_by(LoanAnalysis.timestamp.desc()).limit(10_000):
+        row = serialize(r)
+        writer.writerow([csv_safe(row.get(c)) for c in EXPORT_COLUMNS])
+    filename = f"applications_{_now():%Y%m%d_%H%M}.csv"
+    return Response(
+        content="﻿" + buf.getvalue(),  # BOM so Excel reads ₹ and names correctly
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 def _get_owned(app_id: int, db: Session, user: User) -> LoanAnalysis:
     record = db.get(LoanAnalysis, app_id)
     if not record or (user.role != "ADMIN" and record.user_id != user.id):
@@ -352,6 +441,8 @@ async def review_application(
     officer: User = Depends(require_admin),
 ):
     record = _get_owned(app_id, db, officer)
+    if record.status == "WITHDRAWN":
+        raise HTTPException(409, "The applicant has withdrawn this application")
     record.status = body.status
     record.reviewer_notes = (body.notes or "").strip() or None
     record.reviewer_id = officer.id
@@ -359,6 +450,22 @@ async def review_application(
     db.commit()
     db.refresh(record)
 
+    await manager.notify_application("application.updated", serialize(record))
+    return serialize(record, full=True)
+
+
+@app.post("/applications/{app_id}/withdraw")
+async def withdraw_application(app_id: int, db: Session = Depends(get_db),
+                               user: User = Depends(get_current_user)):
+    """Applicant cancels their own application while it is still pending."""
+    record = db.get(LoanAnalysis, app_id)
+    if not record or record.user_id != user.id:
+        raise HTTPException(404, "Application not found")
+    if record.status != "PENDING":
+        raise HTTPException(409, "Only pending applications can be withdrawn")
+    record.status = "WITHDRAWN"
+    db.commit()
+    db.refresh(record)
     await manager.notify_application("application.updated", serialize(record))
     return serialize(record, full=True)
 

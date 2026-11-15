@@ -46,6 +46,10 @@ class RealtimeService extends ChangeNotifier {
     if (token != null) _connect();
   }
 
+  /// Lets tests simulate a server event without a socket.
+  @visibleForTesting
+  void debugEmit(LiveEvent event) => _events.add(event);
+
   void reconnectNow() {
     if (_token == null) return;
     _attempt = 0;

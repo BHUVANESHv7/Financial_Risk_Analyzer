@@ -58,12 +58,33 @@ flutter run --dart-define=API_URL=http://192.168.1.10:8000
 
 Defaults: web → `http://127.0.0.1:8000`, Android emulator → `http://10.0.2.2:8000`.
 
+### Docker (backend + MySQL)
+
+```bash
+set SECRET_KEY=your-long-random-secret      # macOS/Linux: export SECRET_KEY=...
+docker compose up --build
+docker compose exec api python seed_final.py --demo
+```
+
 ### Tests
 
 ```bash
-cd backend
-venv\Scripts\python -m pytest -q
+cd backend && venv\Scripts\python -m pytest -q     # API, model, security
+cd flutter_app && flutter test                      # models, live updates, widgets
 ```
+
+GitHub Actions runs both suites, `flutter analyze` and a web build on every push.
+
+## Security & safeguards
+
+- **Login protection:** 5 wrong passwords for an account lock it for 15 minutes (per IP);
+  sign-ups are limited per IP.
+- **Production guard:** the API refuses to start with `ENV=production` and a weak `SECRET_KEY`.
+- **Security headers** on every response; WebSocket tokens are sent in a message, not the URL.
+- **Fraud velocity checks:** many applications or near-identical re-submissions within 24 hours
+  are flagged — catching attempts to probe the live score for an approval.
+- **CSV export** neutralises spreadsheet formulas (CSV injection).
+- Docker image runs as a non-root user with a health check.
 
 ## Risk model
 
@@ -114,6 +135,8 @@ against the current model and only replaces it if it scores at least as well (`-
 | GET | `/applications` | List with `status`, `risk`, `fraud`, `q`, `limit`, `offset` |
 | GET | `/applications/{id}` | Full report |
 | PATCH | `/applications/{id}/review` | Officer approves / rejects (pushed live) |
+| POST | `/applications/{id}/withdraw` | Applicant withdraws a pending application |
+| GET | `/applications/export` | Officer CSV export (same filters as the list) |
 | GET | `/stats` | Dashboard KPIs, risk mix, 14-day trend |
 | GET | `/model` | Model algorithm and held-out test metrics |
 | WS | `/ws` | Live events; first message `{"type":"auth","token":"…"}` |

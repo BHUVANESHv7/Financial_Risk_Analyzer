@@ -39,6 +39,15 @@ def check_fraud(features: dict) -> dict:
     if years == 0 and loan > 500000:
         flag("No employment history with large loan request", 2)
 
+    # Velocity checks — set by the server on submit (never trusted from clients).
+    # Many tweaked re-submissions suggest someone probing for an approval.
+    recent = int(features.get("recent_applications") or 0)
+    similar = int(features.get("similar_recent_applications") or 0)
+    if recent >= 5:
+        flag(f"{recent} applications submitted in the last 24 hours", 2)
+    if similar >= 2:
+        flag(f"{similar} near-identical applications in the last 24 hours", 2)
+
     is_fraud = score >= FRAUD_THRESHOLD
     return {
         "fraud_flag": is_fraud,

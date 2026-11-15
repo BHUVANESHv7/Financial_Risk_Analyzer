@@ -37,7 +37,12 @@ ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", 60 * 
 # Leave empty to disable officer self-registration entirely.
 ADMIN_INVITE_CODE = os.getenv("ADMIN_INVITE_CODE", "")
 
-if SECRET_KEY == _DEV_SECRET:
+ENVIRONMENT = os.getenv("ENV", os.getenv("PYTHON_ENV", "development")).lower()
+IS_PRODUCTION = ENVIRONMENT in ("production", "prod")
+
+if SECRET_KEY == _DEV_SECRET or len(SECRET_KEY) < 16:
+    if IS_PRODUCTION:
+        raise RuntimeError("SECRET_KEY must be set to a long random value in production.")
     warnings.warn("SECRET_KEY is not set — using an insecure development key.")
 
 # ── Uploads ───────────────────────────────────────────────────────────────────

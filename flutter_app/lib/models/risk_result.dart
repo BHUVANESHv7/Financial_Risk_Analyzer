@@ -166,6 +166,7 @@ class Tone {
     return switch (status.toUpperCase()) {
       'APPROVED' || 'APPROVE' => Tone(p.success, p.successBg, Icons.check_circle_rounded, 'Approved'),
       'REJECTED' || 'REJECT' => Tone(p.danger, p.dangerBg, Icons.cancel_rounded, 'Rejected'),
+      'WITHDRAWN' => Tone(p.muted, p.surfaceAlt, Icons.undo_rounded, 'Withdrawn'),
       _ => Tone(p.warning, p.warningBg, Icons.hourglass_top_rounded, 'Pending review'),
     };
   }

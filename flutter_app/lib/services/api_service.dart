@@ -166,6 +166,30 @@ class ApiService {
       RiskResult.fromJson(await _send(() => http.patch(_uri('/applications/$id/review'),
           headers: _headers, body: jsonEncode({'status': status, 'notes': notes}))));
 
+  static Future<RiskResult> withdraw(int id) async => RiskResult.fromJson(
+      await _send(() => http.post(_uri('/applications/$id/withdraw'), headers: _headers)));
+
+  /// CSV of applications (officers). Returns (filename, bytes).
+  static Future<(String, Uint8List)> exportCsv({String? status, String? risk, bool? fraud}) async {
+    final q = <String, String>{
+      if (status != null) 'status': status,
+      if (risk != null) 'risk': risk,
+      if (fraud != null) 'fraud': '$fraud',
+    };
+    http.Response res;
+    try {
+      res = await http
+          .get(_uri('/applications/export', q.isEmpty ? null : q), headers: _headers)
+          .timeout(const Duration(seconds: 60));
+    } catch (_) {
+      throw ApiException('Cannot reach the server. Check that the backend is running.');
+    }
+    if (res.statusCode != 200) _decode(res.statusCode, res.body); // throws
+    final disposition = res.headers['content-disposition'] ?? '';
+    final name = RegExp(r'filename="([^"]+)"').firstMatch(disposition)?.group(1) ?? 'applications.csv';
+    return (name, res.bodyBytes);
+  }
+
   static Future<Map<String, dynamic>> stats() async =>
       (await _send(() => http.get(_uri('/stats'), headers: _headers))) as Map<String, dynamic>;
 }

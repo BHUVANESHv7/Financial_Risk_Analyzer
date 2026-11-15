@@ -2,7 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../controllers/applications_controller.dart';
+import '../services/api_service.dart';
 import '../services/realtime_service.dart';
+import '../utils/download.dart';
 import '../theme/app_theme.dart';
 import '../utils/format.dart';
 import '../widgets/applications_list.dart';
@@ -26,10 +28,31 @@ class _AdminDashboardState extends State<AdminDashboard> {
     ..status = 'PENDING' // open on the review queue
     ..load();
 
+  bool _exporting = false;
+
   @override
   void dispose() {
     _c.dispose();
     super.dispose();
+  }
+
+  Future<void> _export() async {
+    final messenger = ScaffoldMessenger.of(context);
+    if (!canSaveFiles) {
+      messenger.showSnackBar(const SnackBar(content: Text('CSV export is available in the web app.')));
+      return;
+    }
+    setState(() => _exporting = true);
+    try {
+      final (name, bytes) =
+          await ApiService.exportCsv(status: _c.status, risk: _c.risk, fraud: _c.fraud);
+      await saveFile(name, bytes, 'text/csv');
+      messenger.showSnackBar(SnackBar(content: Text('Downloaded $name')));
+    } catch (e) {
+      messenger.showSnackBar(SnackBar(content: Text(e.toString())));
+    } finally {
+      if (mounted) setState(() => _exporting = false);
+    }
   }
 
   @override
@@ -51,6 +74,13 @@ class _AdminDashboardState extends State<AdminDashboard> {
                 ),
               ),
             ),
+          IconButton(
+            tooltip: 'Export current list as CSV',
+            icon: _exporting
+                ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
+                : const Icon(Icons.download_rounded),
+            onPressed: _exporting ? null : _export,
+          ),
           const LiveIndicator(),
           const AppMenu(),
         ],

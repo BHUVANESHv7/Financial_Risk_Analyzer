@@ -1,0 +1,37 @@
+# Backend + MySQL for local development or a single server.
+#   docker compose up --build
+# Then seed demo data:
+#   docker compose exec api python seed_final.py --demo
+services:
+  db:
+    image: mysql:8.0
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: loan_analyzer
+      MYSQL_USER: loan
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-change-me}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-change-me-too}
+    volumes:
+      - db_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build: ./backend
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: mysql+pymysql://loan:${MYSQL_PASSWORD:-change-me}@db:3306/loan_analyzer
+      SECRET_KEY: ${SECRET_KEY:?Set SECRET_KEY in your shell or a .env file next to this compose file}
+      ADMIN_INVITE_CODE: ${ADMIN_INVITE_CODE:-}
+      CORS_ORIGINS: ${CORS_ORIGINS:-*}
+    ports:
+      - "8000:8000"
+
+volumes:
+  db_data:

@@ -99,6 +99,33 @@ class _ResultScreenState extends State<ResultScreen> {
     }
   }
 
+  Future<void> _confirmWithdraw() async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Withdraw this application?'),
+        content: const Text(
+            'It will be removed from the review queue. You can submit a new application later.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Keep it')),
+          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Withdraw')),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    setState(() => _reviewing = true);
+    try {
+      final r = await ApiService.withdraw(_r!.id!);
+      if (mounted) setState(() => _r = r);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.toString())));
+      }
+    } finally {
+      if (mounted) setState(() => _reviewing = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final r = _r;
@@ -134,7 +161,18 @@ class _ResultScreenState extends State<ResultScreen> {
       ],
       _statusHeader(context, r),
       const SizedBox(height: 14),
-      if (isAdmin && r.isSaved) ...[_reviewPanel(context, r), const SizedBox(height: 14)],
+      if (!isAdmin && r.isSaved && r.status == 'PENDING') ...[
+        OutlinedButton.icon(
+          onPressed: _reviewing ? null : _confirmWithdraw,
+          icon: const Icon(Icons.undo_rounded),
+          label: const Text('Withdraw application'),
+        ),
+        const SizedBox(height: 14),
+      ],
+      if (isAdmin && r.isSaved && r.status != 'WITHDRAWN') ...[
+        _reviewPanel(context, r),
+        const SizedBox(height: 14),
+      ],
       _scoreCard(context, r),
       const SizedBox(height: 14),
       SectionCard(
@@ -210,11 +248,13 @@ class _ResultScreenState extends State<ResultScreen> {
                 style: TextStyle(color: tone.fg, fontSize: 22, fontWeight: FontWeight.w800)),
             const SizedBox(height: 2),
             Text(
-              r.isReviewed
-                  ? 'Reviewed by ${r.reviewerEmail ?? 'an officer'} · ${relativeTime(r.reviewedAt)}'
-                  : (r.status == 'PENDING'
-                      ? 'Waiting for a bank officer to review'
-                      : 'Decided automatically by the AI'),
+              r.status == 'WITHDRAWN'
+                  ? 'Withdrawn by the applicant'
+                  : r.isReviewed
+                      ? 'Reviewed by ${r.reviewerEmail ?? 'an officer'} · ${relativeTime(r.reviewedAt)}'
+                      : (r.status == 'PENDING'
+                          ? 'Waiting for a bank officer to review'
+                          : 'Decided automatically by the AI'),
               style: TextStyle(color: tone.fg.withValues(alpha: 0.85), fontSize: 13),
             ),
           ]),
@@ -324,7 +364,9 @@ class _ResultScreenState extends State<ResultScreen> {
       TimelineStep('Submitted', subtitle: dateTime(r.timestamp)),
       TimelineStep('AI assessment: ${Tone.decision(context, r.decision).label}',
           subtitle: 'Risk score ${r.riskScore.toStringAsFixed(0)}/100'),
-      if (r.isReviewed)
+      if (r.status == 'WITHDRAWN')
+        TimelineStep('Withdrawn by applicant', color: finalTone.fg)
+      else if (r.isReviewed)
         TimelineStep('Officer decision: ${finalTone.label}',
             subtitle: [dateTime(r.reviewedAt), if (r.reviewerNotes != null) '“${r.reviewerNotes}”']
                 .join('\n'),

@@ -10,7 +10,7 @@ so the app always starts in development.
 from datetime import datetime, timezone
 
 from sqlalchemy import (
-    Boolean, Column, DateTime, Float, ForeignKey, Integer, JSON, String, Text,
+    Boolean, Column, DateTime, Float, ForeignKey, Index, Integer, JSON, String, Text,
     create_engine, inspect, text,
 )
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
@@ -90,22 +90,25 @@ class LoanAnalysis(Base):
     source_file = Column(String(255), nullable=True)
 
     # Model results
-    risk_level = Column(String(50))
+    risk_level = Column(String(50), index=True)
     risk_score = Column(Float, nullable=True)        # 0 (safe) … 100 (risky)
     decision = Column(String(50))                    # AI recommendation
     confidence = Column(Float)
-    fraud_flag = Column(Boolean)
+    fraud_flag = Column(Boolean, index=True)
     compliant = Column(Boolean)
     report_summary = Column(Text)
     details = Column(JSON, nullable=True)            # factors, violations, bias…
 
     # Officer review workflow
-    status = Column(String(30), default="PENDING", nullable=True)  # PENDING / APPROVED / REJECTED
+    status = Column(String(30), default="PENDING", nullable=True, index=True)  # PENDING / APPROVED / REJECTED / WITHDRAWN
     reviewer_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     reviewer_notes = Column(Text, nullable=True)
     reviewed_at = Column(DateTime, nullable=True)
 
     owner = relationship("User", back_populates="analyses", foreign_keys=[user_id])
+
+    # Speeds up per-user history and the 24h fraud velocity check.
+    __table_args__ = (Index("ix_loan_user_time", "user_id", "timestamp"),)
     reviewer = relationship("User", foreign_keys=[reviewer_id])
 
 
@@ -128,9 +131,16 @@ def _add_missing_columns():
             print(f"[DB] Added column {table.name}.{col.name}")
 
 
+def _add_missing_indexes():
+    for table in Base.metadata.sorted_tables:
+        for index in table.indexes:
+            index.create(bind=engine, checkfirst=True)
+
+
 def init_db():
     Base.metadata.create_all(bind=engine)
     _add_missing_columns()
+    _add_missing_indexes()
     # Records created before the review workflow: AI decision is final.
     with engine.begin() as conn:
         conn.execute(text(

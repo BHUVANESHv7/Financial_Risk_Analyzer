@@ -27,6 +27,9 @@ GOOD = {
 RISKY = {**GOOD, "applicant_name": "Risky Person", "monthly_income": 20000,
          "loan_amount": 2500000, "existing_emis": 12000, "credit_score": 520,
          "employment_years": 0}
+MEDIUM_RISK = {**GOOD, "applicant_name": "Medium Risk", "monthly_income": 45000,
+               "loan_amount": 500000, "existing_emis": 0, "credit_score": 660,
+               "employment_years": 2}  # → MANUAL REVIEW (pending)
 BORDERLINE = {**GOOD, "applicant_name": "Border Line", "monthly_income": 40000,
               "loan_amount": 900000, "existing_emis": 4000, "credit_score": 660,
               "employment_years": 2}
@@ -220,3 +223,85 @@ def test_model_endpoint(client):
     r = client.get("/model").json()
     assert r["version"] == 3
     assert r["test_metrics"]["macro_f1"] > 0.99
+
+
+# ── Security & workflow ───────────────────────────────────────────────────────
+
+def test_security_headers(client):
+    r = client.get("/health")
+    assert r.headers["X-Content-Type-Options"] == "nosniff"
+    assert r.headers["X-Frame-Options"] == "DENY"
+
+
+def test_login_rate_limited_after_failures(client):
+    client.post("/register", json={"email": "brute@test.com", "password": "rightpass"})
+    for _ in range(5):
+        r = client.post("/login", data={"username": "brute@test.com", "password": "wrong"})
+        assert r.status_code == 401
+    r = client.post("/login", data={"username": "brute@test.com", "password": "rightpass"})
+    assert r.status_code == 429  # locked even with the right password
+    assert "Retry-After" in r.headers
+
+
+def test_successful_login_resets_failures(client):
+    client.post("/register", json={"email": "oops@test.com", "password": "rightpass"})
+    for _ in range(4):
+        client.post("/login", data={"username": "oops@test.com", "password": "wrong"})
+    assert client.post("/login", data={"username": "oops@test.com", "password": "rightpass"}).status_code == 200
+    for _ in range(4):
+        client.post("/login", data={"username": "oops@test.com", "password": "wrong"})
+    assert client.post("/login", data={"username": "oops@test.com", "password": "rightpass"}).status_code == 200
+
+
+def test_withdraw_rules(client, applicant, officer):
+    other = {"Authorization": f"Bearer {_token(client, 'other2@test.com', 'secret1')}"}
+    created = client.post("/applications", json=MEDIUM_RISK, headers=applicant).json()
+    assert created["status"] == "PENDING"
+    app_id = created["id"]
+
+    assert client.post(f"/applications/{app_id}/withdraw", headers=other).status_code == 404
+    r = client.post(f"/applications/{app_id}/withdraw", headers=applicant)
+    assert r.status_code == 200 and r.json()["status"] == "WITHDRAWN"
+    # Can't withdraw twice, and officers can't review it any more.
+    assert client.post(f"/applications/{app_id}/withdraw", headers=applicant).status_code == 409
+    r = client.patch(f"/applications/{app_id}/review", json={"status": "APPROVED"}, headers=officer)
+    assert r.status_code == 409
+
+
+def test_cannot_withdraw_decided_application(client, applicant):
+    app_id = client.post("/applications", json=RISKY, headers=applicant).json()["id"]  # auto-rejected
+    assert client.post(f"/applications/{app_id}/withdraw", headers=applicant).status_code == 409
+
+
+def test_csv_export(client, applicant, officer):
+    client.post("/applications", json={**GOOD, "applicant_name": "=HYPERLINK(\"x\")"}, headers=applicant)
+    assert client.get("/applications/export", headers=applicant).status_code == 403
+    r = client.get("/applications/export", headers=officer)
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/csv")
+    body = r.content.decode("utf-8-sig")
+    assert body.splitlines()[0].startswith("id,timestamp,applicant_name")
+    assert "'=HYPERLINK" in body          # formula neutralised
+    rejected = client.get("/applications/export?status=REJECTED", headers=officer).content.decode("utf-8-sig")
+    assert all(",REJECTED," in line for line in rejected.splitlines()[1:])
+
+
+def test_repeat_submissions_flagged():
+    from fraud_detector import check_fraud
+    base = {**GOOD, "raw_text_length": None}
+    assert check_fraud(base)["warnings"] == []
+    many = check_fraud({**base, "recent_applications": 6, "similar_recent_applications": 4})
+    assert many["fraud_flag"] and len(many["fraud_reasons"]) == 2
+    some = check_fraud({**base, "recent_applications": 2, "similar_recent_applications": 2})
+    assert not some["fraud_flag"] and some["warnings"]  # warning only
+
+
+def test_velocity_counts_set_by_server(client):
+    t = {"Authorization": f"Bearer {_token(client, 'velocity@test.com', 'secret1')}"}
+    for i in range(6):
+        r = client.post("/applications", json={**BORDERLINE, "loan_amount": 900000 + i * 1000,
+                                                "recent_applications": 0}, headers=t)
+    last = r.json()
+    assert last["features"]["recent_applications"] == 5   # client value ignored
+    assert last["fraud_flag"] is True
+    assert last["status"] == "REJECTED"
