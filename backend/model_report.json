@@ -1,0 +1,139 @@
+{
+  "version": 3,
+  "algorithm": "Ordinal monotone HistGradientBoosting (2 binary boosters)",
+  "trained_at": "2026-11-15T12:15:10+00:00",
+  "data_source": "synthetic",
+  "label_noise": 0.6,
+  "train_rows": 150000,
+  "features": [
+    "monthly_income",
+    "loan_amount",
+    "existing_emis",
+    "employment_years",
+    "credit_score",
+    "num_dependents",
+    "dti",
+    "loan_to_annual_income"
+  ],
+  "monotone_constraints": {
+    "monthly_income": -1,
+    "loan_amount": 1,
+    "existing_emis": 1,
+    "employment_years": -1,
+    "credit_score": -1,
+    "num_dependents": 1,
+    "dti": 1,
+    "loan_to_annual_income": 1
+  },
+  "hyperparameters": {
+    "learning_rate": 0.1,
+    "max_leaf_nodes": 31,
+    "max_iter": 1500,
+    "early_stopping": true,
+    "validation_fraction": 0.1,
+    "n_iter_no_change": 30,
+    "random_state": 42
+  },
+  "boosting_iterations": [
+    214,
+    193
+  ],
+  "fit_seconds": 2.7,
+  "test_metrics": {
+    "accuracy": 0.9961,
+    "macro_f1": 0.9956,
+    "recall_by_class": {
+      "LOW": 0.9954,
+      "MEDIUM": 0.9938,
+      "HIGH": 0.9985
+    },
+    "log_loss": 0.1651,
+    "roc_auc_ovr": 0.9996,
+    "high_risk_marked_low": 0,
+    "confusion_matrix": {
+      "labels": [
+        "LOW",
+        "MEDIUM",
+        "HIGH"
+      ],
+      "matrix": [
+        [
+          8499,
+          39,
+          0
+        ],
+        [
+          11,
+          4682,
+          18
+        ],
+        [
+          0,
+          10,
+          6741
+        ]
+      ]
+    },
+    "illogical_changes_pct": {
+      "credit score +50": 0.0,
+      "employment +3 yrs": 0.0,
+      "income +25%": 0.0,
+      "existing EMIs -40%": 0.0,
+      "loan amount -20%": 0.0
+    },
+    "distinct_score_values": 101,
+    "latency_ms": 3.98,
+    "test_rows": 20000
+  },
+  "previous_model_metrics": {
+    "accuracy": 0.9535,
+    "macro_f1": 0.947,
+    "recall_by_class": {
+      "LOW": 0.9775,
+      "MEDIUM": 0.9238,
+      "HIGH": 0.9439
+    },
+    "log_loss": 0.1868,
+    "roc_auc_ovr": 0.995,
+    "high_risk_marked_low": 0,
+    "confusion_matrix": {
+      "labels": [
+        "LOW",
+        "MEDIUM",
+        "HIGH"
+      ],
+      "matrix": [
+        [
+          8346,
+          192,
+          0
+        ],
+        [
+          262,
+          4352,
+          97
+        ],
+        [
+          0,
+          379,
+          6372
+        ]
+      ]
+    },
+    "illogical_changes_pct": {
+      "credit score +50": 2.2,
+      "employment +3 yrs": 5.04,
+      "income +25%": 2.1,
+      "existing EMIs -40%": 9.58,
+      "loan amount -20%": 8.2
+    },
+    "distinct_score_values": 101,
+    "latency_ms": 16.89,
+    "test_rows": 20000
+  },
+  "cross_validation": {
+    "folds": 5,
+    "macro_f1_mean": 0.9958,
+    "macro_f1_std": 0.0009
+  }
+}

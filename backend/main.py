@@ -40,7 +40,7 @@ from auth import (
 from database import LoanAnalysis, SessionLocal, User, engine, get_db, init_db
 from pipeline import assess
 from realtime import Client, manager
-from risk_model import MODEL_VERSION, get_model
+from risk_model import MODEL_VERSION, get_model, model_report
 from schemas import FeaturesIn, RegisterIn, ReviewIn
 
 
@@ -122,6 +122,12 @@ def health():
         "model_version": MODEL_VERSION,
         "live_connections": manager.count,
     }
+
+
+@app.get("/model")
+def model_info():
+    """Algorithm, training data and held-out test metrics of the live model."""
+    return model_report()
 
 
 @app.get("/meta")

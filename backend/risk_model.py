@@ -2,27 +2,37 @@
 risk_model.py
 ─────────────
 Layer 2 — ML Module
-Random Forest classifier that predicts loan risk as LOW / MEDIUM / HIGH,
-plus a continuous 0–100 risk score and plain-language key factors.
+Predicts loan risk as LOW / MEDIUM / HIGH, plus a continuous 0–100 risk
+score and plain-language key factors.
 
-The model trains on synthetic data the first time (or when the saved
-model is from an older version). Replace `_synthetic_dataset` with real
-data in production.
+Model (v3): an *ordinal, monotone* gradient-boosting model.
+  • Risk levels are ordered, so instead of three unrelated classes we learn
+    two questions: "is it at least MEDIUM?" and "is it HIGH?".
+  • Each question is a HistGradientBoosting model with monotonic constraints,
+    which guarantees sensible behaviour: a higher credit score, higher income
+    or longer employment can never increase risk, and more debt can never
+    decrease it.
+
+Train / evaluate / retrain on real data with:  python train_model.py --help
 """
 
+import json
 import os
 import threading
 
-import joblib
+# Avoids a noisy (harmless) joblib warning about counting CPU cores on Windows.
+os.environ.setdefault("LOKY_MAX_CPU_COUNT", str(os.cpu_count() or 1))
+
+import joblib  # noqa: E402
 import numpy as np
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import StandardScaler
+from sklearn.ensemble import HistGradientBoostingClassifier
 
-from finance import estimate_emi, ratios
+from finance import ratios
 
-MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "risk_model.pkl")
-MODEL_VERSION = 2
+_HERE = os.path.dirname(os.path.abspath(__file__))
+MODEL_PATH = os.path.join(_HERE, "risk_model.pkl")
+REPORT_PATH = os.path.join(_HERE, "model_report.json")
+MODEL_VERSION = 3
 
 FEATURES = [
     "monthly_income",
@@ -34,9 +44,34 @@ FEATURES = [
     "dti",
     "loan_to_annual_income",
 ]
+# +1: feature can only raise risk, -1: can only lower risk.
+MONOTONE = {
+    "monthly_income": -1,
+    "loan_amount": 1,
+    "existing_emis": 1,
+    "employment_years": -1,
+    "credit_score": -1,
+    "num_dependents": 1,
+    "dti": 1,
+    "loan_to_annual_income": 1,
+}
 LABELS = ["LOW", "MEDIUM", "HIGH"]
 # Weight of each class when collapsing probabilities into a 0–100 score.
 _SCORE_WEIGHTS = {"LOW": 0.0, "MEDIUM": 50.0, "HIGH": 100.0}
+
+# Uncertainty added to synthetic labels near policy cut-offs (see policy_labels).
+LABEL_NOISE = 0.6
+
+# Tuned with train_model.py (see model_report.json).
+HYPERPARAMS = dict(
+    learning_rate=0.1,
+    max_leaf_nodes=31,
+    max_iter=1500,
+    early_stopping=True,
+    validation_fraction=0.1,
+    n_iter_no_change=30,
+    random_state=42,
+)
 
 DEFAULTS = {
     "monthly_income": 30000.0,
@@ -48,9 +83,38 @@ DEFAULTS = {
 }
 
 
-# ── Training ──────────────────────────────────────────────────────────────────
+class OrdinalRiskModel:
+    """Two monotone binary boosters: P(risk ≥ MEDIUM) and P(risk ≥ HIGH)."""
+
+    classes_ = np.array(LABELS)
+
+    def __init__(self, **params):
+        self.params = {**HYPERPARAMS, **params}
+        self.models = []
+
+    def fit(self, X, y):
+        level = np.array([LABELS.index(v) for v in y])
+        cst = [MONOTONE[f] for f in FEATURES]
+        self.models = [
+            HistGradientBoostingClassifier(monotonic_cst=cst, **self.params).fit(X, level >= k)
+            for k in (1, 2)
+        ]
+        return self
+
+    def predict_proba(self, X):
+        X = np.asarray(X, dtype=float)
+        p_med = self.models[0].predict_proba(X)[:, 1]
+        p_high = np.minimum(self.models[1].predict_proba(X)[:, 1], p_med)  # keep ordered
+        return np.column_stack([1 - p_med, p_med - p_high, p_high])
+
+    def predict(self, X):
+        return self.classes_[self.predict_proba(X).argmax(1)]
+
+
+# ── Synthetic training data ───────────────────────────────────────────────────
 
 def _label(income, loan, emis, years, credit, deps, dti) -> str:
+    """Rule-based risk tier used to label synthetic data."""
     score = 0
     if credit >= 750: score += 3
     elif credit >= 680: score += 2
@@ -79,7 +143,24 @@ def _label(income, loan, emis, years, credit, deps, dti) -> str:
     return "HIGH"
 
 
-def _synthetic_dataset(n: int = 6000, seed: int = 42):
+def feature_matrix(raw: np.ndarray) -> np.ndarray:
+    """
+    raw columns: income, loan, emis, years, credit, deps, tenure_months, rate
+    → model features in FEATURES order (vectorised).
+    """
+    inc, loan, emis, yrs, cs, deps, months, rate = np.asarray(raw, dtype=float).T
+    inc = np.maximum(inc, 1.0)
+    r = rate / 1200
+    growth = (1 + r) ** months
+    with np.errstate(divide="ignore", invalid="ignore"):
+        emi = np.where(r > 0, loan * r * growth / (growth - 1), loan / np.maximum(months, 1))
+    emi = np.where(loan > 0, emi, 0.0)
+    dti = (emis + emi) / inc
+    lti = loan / (inc * 12)
+    return np.column_stack([inc, loan, emis, yrs, cs, deps, dti, lti])
+
+
+def synthetic_raw(n: int, seed: int) -> np.ndarray:
     rng = np.random.default_rng(seed)
     income = np.round(np.exp(rng.uniform(np.log(12000), np.log(300000), n)), -2)
     loan = np.round(np.exp(rng.uniform(np.log(30000), np.log(5000000), n)), -3)
@@ -87,35 +168,60 @@ def _synthetic_dataset(n: int = 6000, seed: int = 42):
     years = rng.integers(0, 31, n).astype(float)
     credit = np.clip(rng.normal(690, 90, n), 300, 900).round()
     deps = rng.integers(0, 7, n).astype(float)
-    months = rng.choice([12, 24, 36, 48, 60, 84, 120], n)
+    months = rng.choice([12, 24, 36, 48, 60, 84, 120], n).astype(float)
     rate = rng.uniform(8, 18, n)
+    return np.column_stack([income, loan, emis, years, credit, deps, months, rate])
 
-    rows, y = [], []
-    for i in range(n):
-        new_emi = estimate_emi(loan[i], rate[i], int(months[i]))
-        dti = (emis[i] + new_emi) / income[i]
-        lti = loan[i] / (income[i] * 12)
-        rows.append([income[i], loan[i], emis[i], years[i], credit[i], deps[i], dti, lti])
-        y.append(_label(income[i], loan[i], emis[i], years[i], credit[i], deps[i], dti))
-    return np.array(rows), np.array(y)
+
+def policy_points(X: np.ndarray) -> np.ndarray:
+    """Vectorised version of the points used by _label (higher = safer)."""
+    inc, loan, emis, yrs, cs, deps, dti, lti = np.asarray(X, dtype=float).T
+    s = np.select([cs >= 750, cs >= 680, cs >= 600, cs < 550], [3, 2, 1, -2], 0).astype(float)
+    s += np.select([inc >= 60000, inc >= 30000], [2, 1], 0)
+    s += (yrs >= 3).astype(float) - (yrs < 1)
+    s += np.select([lti < 1, lti < 2, lti > 4], [2, 1, -1], 0)
+    s += np.select([dti > 0.65, dti > 0.5, dti > 0.35], [-4, -2, -1], 0)
+    s -= (deps >= 4) & (inc < 30000)
+    return s
+
+
+def policy_labels(X: np.ndarray, noise: float = 0.0, seed: int = 0) -> np.ndarray:
+    """
+    Risk tier from the lending policy. With noise > 0, applicants near a
+    cut-off sometimes land in the neighbouring tier — like real outcomes.
+    This teaches the model graded probabilities instead of hard 0/50/100
+    jumps, so the live risk score moves smoothly.
+    """
+    s = policy_points(X)
+    if noise > 0:
+        # Separate stream from synthetic_raw(seed) so noise is independent of features.
+        s = s + np.random.default_rng([seed, 0xA11CE]).logistic(0, noise, len(s))
+    # Cut-offs sit half-way between integer points (same tiers as _label).
+    return np.where(s >= 4.5, "LOW", np.where(s >= 1.5, "MEDIUM", "HIGH"))
+
+
+def synthetic_dataset(n: int = 150_000, seed: int = 7, noise: float = LABEL_NOISE):
+    X = feature_matrix(synthetic_raw(n, seed))
+    return X, policy_labels(X, noise, seed)
+
+
+# ── Training / loading ────────────────────────────────────────────────────────
+
+def save(model, report: dict | None = None):
+    joblib.dump({"version": MODEL_VERSION, "features": FEATURES, "pipeline": model}, MODEL_PATH)
+    if report is not None:
+        with open(REPORT_PATH, "w", encoding="utf-8") as fh:
+            json.dump(report, fh, indent=2)
+    print(f"[ML] Model v{MODEL_VERSION} saved to {MODEL_PATH}")
 
 
 def train_and_save():
-    X, y = _synthetic_dataset()
-    pipeline = Pipeline([
-        ("scaler", StandardScaler()),
-        ("clf", RandomForestClassifier(
-            n_estimators=150, max_depth=12, min_samples_leaf=3,
-            random_state=42, n_jobs=-1,
-        )),
-    ])
-    pipeline.fit(X, y)
-    joblib.dump({"version": MODEL_VERSION, "features": FEATURES, "pipeline": pipeline}, MODEL_PATH)
-    print(f"[ML] Model v{MODEL_VERSION} trained and saved to {MODEL_PATH}")
-    return pipeline
+    """Fallback used when no saved model exists. Prefer train_model.py."""
+    X, y = synthetic_dataset()
+    model = OrdinalRiskModel().fit(X, y)
+    save(model)
+    return model
 
-
-# ── Loading ───────────────────────────────────────────────────────────────────
 
 _model = None
 _lock = threading.Lock()
@@ -137,9 +243,17 @@ def get_model():
                 _model = bundle["pipeline"]
                 print(f"[ML] Model v{MODEL_VERSION} loaded")
             else:
-                print("[ML] Training new model...")
+                print("[ML] Training new model (about 15s)...")
                 _model = train_and_save()
     return _model
+
+
+def model_report() -> dict:
+    try:
+        with open(REPORT_PATH, encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return {"version": MODEL_VERSION, "note": "Run train_model.py to generate metrics"}
 
 
 # ── Prediction ────────────────────────────────────────────────────────────────

@@ -65,6 +65,44 @@ cd backend
 venv\Scripts\python -m pytest -q
 ```
 
+## Risk model
+
+**Ordinal, monotone gradient boosting** (`backend/risk_model.py`, v3):
+
+- Risk levels are ordered, so the model answers two questions — *"at least MEDIUM?"* and
+  *"HIGH?"* — each with a `HistGradientBoostingClassifier`.
+- **Monotonic constraints** guarantee logical behaviour: a better credit score, higher income or
+  longer employment can never raise risk; more debt or a bigger loan can never lower it.
+- Trained on 150k synthetic applications labelled by the lending policy, with realistic
+  uncertainty near cut-offs so the 0–100 risk score moves smoothly instead of jumping.
+
+Held-out results (20k unseen applications) vs. the previous Random Forest:
+
+| Metric | Previous | Current |
+|---|---|---|
+| Agreement with lending policy (accuracy) | 95.4% | **99.6%** |
+| Macro F1 | 0.947 | **0.996** |
+| MEDIUM-risk recall | 92.4% | **99.4%** |
+| Illogical score changes (e.g. paying off EMIs raises risk) | up to 9.6% | **0%** |
+| Prediction time | 17 ms | **4 ms** |
+
+Full metrics: `backend/model_report.json` or `GET /model`.
+
+### Retrain
+
+```bash
+cd backend
+venv\Scripts\python train_model.py --cv 5              # synthetic data
+venv\Scripts\python train_model.py --data loans.csv     # your real historical data
+```
+
+The CSV needs `monthly_income, loan_amount, existing_emis, employment_years, credit_score,
+num_dependents, risk_level` (optional `tenure_months`, `interest_rate`). The script compares
+against the current model and only replaces it if it scores at least as well (`--force` to override).
+
+> Synthetic labels follow the app's own lending rules, so these numbers measure how faithfully
+> the model learns that policy. Real-world accuracy needs real repayment data via `--data`.
+
 ## API overview
 
 | Method | Path | Purpose |
@@ -77,4 +115,5 @@ venv\Scripts\python -m pytest -q
 | GET | `/applications/{id}` | Full report |
 | PATCH | `/applications/{id}/review` | Officer approves / rejects (pushed live) |
 | GET | `/stats` | Dashboard KPIs, risk mix, 14-day trend |
+| GET | `/model` | Model algorithm and held-out test metrics |
 | WS | `/ws` | Live events; first message `{"type":"auth","token":"…"}` |

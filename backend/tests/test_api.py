@@ -174,3 +174,49 @@ def test_text_extraction():
     assert f["applicant_name"] == "Ravi Kumar"
     assert f["monthly_income"] == 45000
     assert f["credit_score"] == 765
+
+
+# ── Model quality ─────────────────────────────────────────────────────────────
+
+def _score(**over):
+    from risk_model import predict_risk
+    return predict_risk({**BORDERLINE, **over})["risk_score"]
+
+
+def test_model_is_monotone():
+    """Improving any single factor must never raise the risk score."""
+    import numpy as np
+    import risk_model as rm
+
+    raw = rm.synthetic_raw(2000, seed=123)
+    model = rm.get_model()
+    w = np.array([0, 50, 100])
+    base = model.predict_proba(rm.feature_matrix(raw)) @ w
+    for col, fn in [(4, lambda c: np.clip(c + 60, 300, 900)), (3, lambda c: c + 5),
+                    (0, lambda c: c * 1.3), (2, lambda c: c * 0.5)]:
+        better = raw.copy()
+        better[:, col] = fn(better[:, col])
+        after = model.predict_proba(rm.feature_matrix(better)) @ w
+        assert np.all(after <= base + 1e-6)
+
+
+def test_score_moves_in_expected_direction():
+    assert _score(credit_score=820) < _score(credit_score=560)
+    assert _score(existing_emis=0) < _score(existing_emis=30000)
+    assert _score(monthly_income=150000) < _score(monthly_income=25000)
+
+
+def test_model_accuracy_on_holdout():
+    import risk_model as rm
+    from sklearn.metrics import f1_score
+
+    raw = rm.synthetic_raw(5000, seed=2024)
+    X = rm.feature_matrix(raw)
+    y = [rm._label(*r[:6], r[6]) for r in X]
+    assert f1_score(y, rm.get_model().predict(X), average="macro") > 0.99
+
+
+def test_model_endpoint(client):
+    r = client.get("/model").json()
+    assert r["version"] == 3
+    assert r["test_metrics"]["macro_f1"] > 0.99
