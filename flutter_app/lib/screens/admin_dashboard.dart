@@ -9,6 +9,7 @@ import '../theme/app_theme.dart';
 import '../utils/format.dart';
 import '../widgets/applications_list.dart';
 import '../widgets/common.dart';
+import '../widgets/insights_widgets.dart';
 import '../widgets/trend_chart.dart';
 import 'app_menu.dart';
 
@@ -187,6 +188,9 @@ class _AdminDashboardState extends State<AdminDashboard> {
           const SizedBox(height: 14),
           mix,
         ],
+        const SizedBox(height: 14),
+        // Re-checks whenever the number of applications changes (live).
+        ModelHealthCard(refreshKey: s['total']),
       ]);
     });
   }

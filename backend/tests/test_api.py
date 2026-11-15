@@ -305,3 +305,93 @@ def test_velocity_counts_set_by_server(client):
     assert last["features"]["recent_applications"] == 5   # client value ignored
     assert last["fraud_flag"] is True
     assert last["status"] == "REJECTED"
+
+
+# ── Path to approval ──────────────────────────────────────────────────────────
+
+def test_advice_finds_a_change_that_approves(client, applicant):
+    from pipeline import assess
+    assert client.post("/advice", json=MEDIUM_RISK).status_code == 401
+    r = client.post("/advice", json=MEDIUM_RISK, headers=applicant)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["qualifies"] is False and body["options"]
+    for opt in body["options"]:
+        # Every suggestion must really flip the decision when applied.
+        changed = {**MEDIUM_RISK, opt["key"]: opt["value"]}
+        assert assess(changed)["decision"] == "APPROVE", opt
+    efforts = [o["effort"] for o in body["options"]]
+    assert efforts == sorted(efforts)
+
+
+def test_advice_shows_headroom_when_approved(client, applicant):
+    from pipeline import assess
+    body = client.post("/advice", json=GOOD, headers=applicant).json()
+    assert body["qualifies"] is True
+    assert body["max_loan_amount"] >= GOOD["loan_amount"]
+    assert assess({**GOOD, "loan_amount": body["max_loan_amount"]})["decision"] == "APPROVE"
+
+
+def test_advice_refuses_to_coach_around_fraud(client, applicant):
+    body = client.post("/advice", json={**RISKY, "loan_amount": 2_000_000, "monthly_income": 30000,
+                                        "existing_emis": 40000}, headers=applicant).json()
+    assert body["fraud_blocked"] is True and body["options"] == []
+
+
+# ── Audit trail ───────────────────────────────────────────────────────────────
+
+def test_audit_trail_records_and_verifies(client, applicant, officer):
+    app_id = client.post("/applications", json=MEDIUM_RISK, headers=applicant).json()["id"]
+    client.patch(f"/applications/{app_id}/review", json={"status": "APPROVED", "notes": "ok"},
+                 headers=officer)
+    r = client.get(f"/applications/{app_id}/audit", headers=applicant)
+    assert r.status_code == 200
+    body = r.json()
+    assert [e["action"] for e in body["events"]] == ["CREATED", "REVIEWED"]
+    assert body["verified"] is True
+    assert body["events"][1]["data"]["status"] == "APPROVED"
+    assert body["events"][1]["actor_email"] == "officer@test.com"
+
+    other = {"Authorization": f"Bearer {_token(client, 'snoop@test.com', 'secret1')}"}
+    assert client.get(f"/applications/{app_id}/audit", headers=other).status_code == 404
+    assert client.get("/audit/verify", headers=applicant).status_code == 403
+    assert client.get("/audit/verify", headers=officer).json()["valid"] is True
+
+
+def test_audit_detects_tampering(client, officer):
+    from database import AuditEvent, SessionLocal
+    with SessionLocal() as db:
+        event = db.query(AuditEvent).order_by(AuditEvent.id).first()
+        original = dict(event.data)
+        event.data = {**original, "status": "APPROVED", "risk_score": 1.0}
+        db.commit()
+        try:
+            result = client.get("/audit/verify", headers=officer).json()
+            assert result["valid"] is False and result["broken_at"] == event.id
+        finally:
+            event.data = original
+            db.commit()
+    assert client.get("/audit/verify", headers=officer).json()["valid"] is True
+
+
+# ── Model health ──────────────────────────────────────────────────────────────
+
+def test_model_health_reports_drift(client, applicant, officer):
+    assert client.get("/model/health", headers=applicant).status_code == 403
+    for i in range(30):
+        client.post("/applications", json={**GOOD, "loan_amount": 300000 + i * 7000},
+                    headers=applicant)
+    body = client.get("/model/health", headers=officer).json()
+    assert body["sample_size"] >= 30
+    assert body["status"] in ("stable", "moderate", "significant")
+    assert len(body["features"]) == 8
+    # Every test applicant earns ₹90k with 8 years' service — clearly unlike training data.
+    assert body["status"] == "significant"
+
+
+def test_psi_is_zero_for_identical_distributions():
+    import numpy as np
+    from monitoring import psi
+    p = np.full(10, 0.1)
+    assert psi(p, p) == 0
+    assert psi(p, np.array([0.5] + [0.5 / 9] * 9)) > 0.25

@@ -3,11 +3,13 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../models/insights.dart';
 import '../models/risk_result.dart';
 import '../services/api_service.dart';
 import '../theme/app_theme.dart';
 import '../utils/format.dart';
 import '../widgets/common.dart';
+import '../widgets/insights_widgets.dart';
 import '../widgets/report_widgets.dart';
 import '../widgets/risk_gauge.dart';
 import 'result_screen.dart';
@@ -41,6 +43,10 @@ class _VerifyDataScreenState extends State<VerifyDataScreen> {
   Timer? _debounce;
   int _requestSeq = 0;
 
+  Advice? _advice;
+  bool _advising = false;
+  String? _adviceError;
+
   @override
   void initState() {
     super.initState();
@@ -71,6 +77,8 @@ class _VerifyDataScreenState extends State<VerifyDataScreen> {
       _loan.text = '500000';
       _scoring = true;
       _debounce = Timer(Duration.zero, _rescore);
+    } else {
+      _debounce = Timer(Duration.zero, () => _advise(_requestSeq));
     }
     for (final c in [_income, _loan, _emis]) {
       var last = c.text;
@@ -129,12 +137,56 @@ class _VerifyDataScreenState extends State<VerifyDataScreen> {
         _live = r;
         _error = null;
       });
+      _advise(seq);
     } catch (e) {
       if (mounted && seq == _requestSeq) setState(() => _error = e.toString());
     } finally {
       if (mounted && seq == _requestSeq) setState(() => _scoring = false);
     }
   }
+
+  /// Path to approval for the current values (runs after each live score).
+  Future<void> _advise(int seq) async {
+    setState(() => _advising = true);
+    try {
+      final a = await ApiService.advice(_features);
+      if (!mounted || seq != _requestSeq) return;
+      setState(() {
+        _advice = a;
+        _adviceError = null;
+      });
+    } catch (e) {
+      if (mounted && seq == _requestSeq) setState(() => _adviceError = e.toString());
+    } finally {
+      if (mounted && seq == _requestSeq) setState(() => _advising = false);
+    }
+  }
+
+  /// Apply one suggested change to the form; the live score updates itself.
+  void _applyAdvice(AdviceOption o) {
+    final whole = o.value.round().toString();
+    switch (o.key) {
+      case 'loan_amount':
+        _loan.text = whole;
+      case 'existing_emis':
+        _emis.text = whole;
+      case 'monthly_income':
+        _income.text = whole;
+      case 'credit_score':
+        setState(() => _credit = o.value.clamp(300, 900));
+        _changed();
+      case 'tenure_months':
+        setState(() => _tenure = o.value.round().clamp(6, 360));
+        _changed();
+    }
+  }
+
+  Widget _approvalPath() => ApprovalPathCard(
+        advice: _advice,
+        loading: _advising,
+        error: _adviceError,
+        onApply: _applyAdvice,
+      );
 
   Future<void> _submit() async {
     if (!_form.currentState!.validate()) return;
@@ -177,7 +229,11 @@ class _VerifyDataScreenState extends State<VerifyDataScreen> {
                         padding: const EdgeInsets.all(20), children: _formChildren(context))),
                     Expanded(flex: 5, child: ListView(
                         padding: const EdgeInsets.fromLTRB(0, 20, 20, 20),
-                        children: [_livePanel(context, showSubmit: true)])),
+                        children: [
+                          _livePanel(context, showSubmit: true),
+                          const SizedBox(height: 16),
+                          _approvalPath(),
+                        ])),
                   ]),
                 ),
               )
@@ -188,6 +244,8 @@ class _VerifyDataScreenState extends State<VerifyDataScreen> {
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
                       _livePanel(context, showSubmit: false),
+                      const SizedBox(height: 16),
+                      _approvalPath(),
                       const SizedBox(height: 16),
                       ..._formChildren(context),
                     ],

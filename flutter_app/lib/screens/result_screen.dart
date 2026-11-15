@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+import '../models/insights.dart';
 import '../models/risk_result.dart';
 import '../services/api_service.dart';
 import '../services/auth_service.dart';
@@ -10,6 +11,7 @@ import '../services/realtime_service.dart';
 import '../theme/app_theme.dart';
 import '../utils/format.dart';
 import '../widgets/common.dart';
+import '../widgets/insights_widgets.dart';
 import '../widgets/report_widgets.dart';
 import '../widgets/risk_gauge.dart';
 
@@ -37,13 +39,20 @@ class _ResultScreenState extends State<ResultScreen> {
   final _notes = TextEditingController();
   bool _reviewing = false;
 
+  Advice? _advice;
+  String? _adviceError;
+
   @override
   void initState() {
     super.initState();
     _r = widget.initial;
     _notes.text = _r?.reviewerNotes ?? '';
     // List items don't carry the full report, so fetch details if missing.
-    if (widget.applicationId != null && (_r == null || _r!.factors.isEmpty)) _load();
+    if (widget.applicationId != null && (_r == null || _r!.factors.isEmpty)) {
+      _load();
+    } else {
+      Timer.run(_loadAdvice);
+    }
     _sub = context.read<RealtimeService>().events.listen((e) {
       if (e.type == 'application.updated' && e.applicationId == widget.applicationId) {
         _load(live: true);
@@ -69,6 +78,7 @@ class _ResultScreenState extends State<ResultScreen> {
         if (live) _updatedLive = true;
         if (!_reviewing) _notes.text = r.reviewerNotes ?? '';
       });
+      if (_advice == null) _loadAdvice();
       if (live) {
         Timer(const Duration(seconds: 4), () {
           if (mounted) setState(() => _updatedLive = false);
@@ -78,6 +88,17 @@ class _ResultScreenState extends State<ResultScreen> {
       if (mounted) setState(() => _error = e.toString());
     } finally {
       if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  Future<void> _loadAdvice() async {
+    final f = _r?.features;
+    if (f == null || f.isEmpty) return;
+    try {
+      final a = await ApiService.advice(f);
+      if (mounted) setState(() => _advice = a);
+    } catch (e) {
+      if (mounted) setState(() => _adviceError = e.toString());
     }
   }
 
@@ -180,6 +201,10 @@ class _ResultScreenState extends State<ResultScreen> {
         icon: Icons.insights_rounded,
         child: Column(children: [for (final f in r.factors) FactorRow(f)]),
       ),
+      if (r.features.isNotEmpty && r.status != 'WITHDRAWN') ...[
+        const SizedBox(height: 14),
+        ApprovalPathCard(advice: _advice, error: _adviceError),
+      ],
     ];
 
     final right = <Widget>[
@@ -189,6 +214,8 @@ class _ResultScreenState extends State<ResultScreen> {
       const SizedBox(height: 14),
       if (r.isSaved) ...[
         SectionCard(title: 'Timeline', icon: Icons.timeline_rounded, child: Timeline(_timeline(context, r))),
+        const SizedBox(height: 14),
+        AuditTrailCard(applicationId: r.id!, refreshKey: '${r.status}|${r.reviewedAt}'),
         const SizedBox(height: 14),
       ],
       if (r.reportSummary.isNotEmpty)

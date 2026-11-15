@@ -112,6 +112,26 @@ class LoanAnalysis(Base):
     reviewer = relationship("User", foreign_keys=[reviewer_id])
 
 
+class AuditEvent(Base):
+    """
+    Append-only, hash-chained ledger of everything that happens to an application.
+    Each row stores the SHA-256 of its own content plus the previous row's hash,
+    so editing or deleting any past row breaks the chain (see audit.verify_chain).
+    """
+    __tablename__ = "audit_events"
+
+    id = Column(Integer, primary_key=True, index=True)
+    application_id = Column(Integer, ForeignKey("loan_analyses.id"), index=True)
+    actor_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    actor_email = Column(String(255), nullable=True)
+    actor_role = Column(String(50), nullable=True)
+    action = Column(String(50))                      # CREATED / REVIEWED / WITHDRAWN
+    data = Column(JSON, nullable=True)
+    timestamp = Column(DateTime, default=_utcnow)
+    prev_hash = Column(String(64))
+    hash = Column(String(64), unique=True)
+
+
 def _add_missing_columns():
     """
     Tiny migration helper: create_all() never alters existing tables,

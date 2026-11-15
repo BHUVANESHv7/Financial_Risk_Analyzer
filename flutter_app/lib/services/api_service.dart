@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
 import '../config.dart';
+import '../models/insights.dart';
 import '../models/risk_result.dart';
 
 class ApiException implements Exception {
@@ -192,4 +193,21 @@ class ApiService {
 
   static Future<Map<String, dynamic>> stats() async =>
       (await _send(() => http.get(_uri('/stats'), headers: _headers))) as Map<String, dynamic>;
+
+  // ── AI insights ──────────────────────────────────────────────
+  /// Path to approval: smallest change that gets automatic approval.
+  static Future<Advice> advice(Map<String, dynamic> features) async => Advice.fromJson(
+      await _send(() => http.post(_uri('/advice'), headers: _headers, body: jsonEncode(features))));
+
+  /// Hash-chained audit trail of one application.
+  static Future<AuditTrail> audit(int id) async => AuditTrail.fromJson(
+      await _send(() => http.get(_uri('/applications/$id/audit'), headers: _headers)));
+
+  /// Re-verify the whole audit ledger (officers).
+  static Future<Map<String, dynamic>> verifyLedger() async =>
+      (await _send(() => http.get(_uri('/audit/verify'), headers: _headers))) as Map<String, dynamic>;
+
+  /// Live data drift vs. training data (officers).
+  static Future<ModelHealth> modelHealth() async => ModelHealth.fromJson(
+      await _send(() => http.get(_uri('/model/health'), headers: _headers)));
 }

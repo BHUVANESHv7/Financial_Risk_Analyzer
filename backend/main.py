@@ -8,7 +8,10 @@ Flow:
   2. POST /recalculate       live "what-if" while the user edits values (not saved)
   3. POST /applications      submit verified values → saved + pushed live
   4. PATCH /applications/id/review   bank officer approves / rejects → pushed live
-  5. WS   /ws                real-time events (first message: {"type":"auth","token":…})
+  5. POST /advice            "path to approval": smallest change that gets auto-approval
+  6. GET  /applications/id/audit     tamper-evident, hash-chained audit trail
+  7. GET  /model/health      live data drift (PSI) vs. the training data
+  8. WS   /ws                real-time events (first message: {"type":"auth","token":…})
 
 Run with:
     uvicorn main:app --reload --host 0.0.0.0 --port 8000
@@ -33,12 +36,15 @@ from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
+import audit
 import config
+from advisor import approval_path
 from auth import (
     create_access_token, get_current_user, get_password_hash, require_admin,
     user_from_token, verify_password,
 )
 from database import LoanAnalysis, SessionLocal, User, engine, get_db, init_db
+from monitoring import drift_report
 from pipeline import assess
 from realtime import Client, manager
 from risk_model import MODEL_VERSION, get_model, model_report
@@ -49,6 +55,8 @@ from security import SECURITY_HEADERS, csv_safe, login_limiter, register_limiter
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     init_db()
+    with SessionLocal() as db:
+        audit.backfill(db)
     await run_in_threadpool(get_model)  # warm the model so the first request is fast
     yield
 
@@ -143,6 +151,13 @@ def health():
 def model_info():
     """Algorithm, training data and held-out test metrics of the live model."""
     return model_report()
+
+
+@app.get("/model/health")
+def model_health(window: int = Query(500, ge=30, le=5000), db: Session = Depends(get_db),
+                 _: User = Depends(require_admin)):
+    """Data drift of recent applications vs. the training data (officers)."""
+    return drift_report(db, window)
 
 
 @app.get("/meta")
@@ -279,6 +294,16 @@ async def recalculate(body: FeaturesIn, _: User = Depends(get_current_user)):
     return await run_in_threadpool(assess, body.model_dump())
 
 
+@app.post("/advice")
+async def advice(body: FeaturesIn, _: User = Depends(get_current_user)):
+    """
+    Path to approval: the smallest single change (loan, tenure, EMIs, income,
+    credit score) that would get automatic approval — or, if it already
+    qualifies, the largest loan that would still be approved.
+    """
+    return await run_in_threadpool(approval_path, body.model_dump())
+
+
 @app.post("/applications", status_code=201)
 async def submit_application(
     body: FeaturesIn,
@@ -331,6 +356,7 @@ async def submit_application(
     db.commit()
     db.refresh(record)
 
+    audit.record_event(db, record, "CREATED", user)
     data = serialize(record, full=True)
     await manager.notify_application("application.created", serialize(record))
     return data
@@ -433,6 +459,22 @@ def get_application(app_id: int, db: Session = Depends(get_db), user: User = Dep
     return serialize(_get_owned(app_id, db, user), full=True)
 
 
+@app.get("/applications/{app_id}/audit")
+def application_audit(app_id: int, db: Session = Depends(get_db),
+                      user: User = Depends(get_current_user)):
+    """Every recorded change to this application, each with its hash-chain check."""
+    _get_owned(app_id, db, user)
+    events = audit.events_for(db, app_id)
+    return {"application_id": app_id, "events": events,
+            "verified": all(e["verified"] for e in events)}
+
+
+@app.get("/audit/verify")
+def verify_audit(db: Session = Depends(get_db), _: User = Depends(require_admin)):
+    """Re-hash the entire ledger and report the first broken link, if any."""
+    return audit.verify_chain(db)
+
+
 @app.patch("/applications/{app_id}/review")
 async def review_application(
     app_id: int,
@@ -449,6 +491,7 @@ async def review_application(
     record.reviewed_at = _now()
     db.commit()
     db.refresh(record)
+    audit.record_event(db, record, "REVIEWED", officer)
 
     await manager.notify_application("application.updated", serialize(record))
     return serialize(record, full=True)
@@ -466,6 +509,7 @@ async def withdraw_application(app_id: int, db: Session = Depends(get_db),
     record.status = "WITHDRAWN"
     db.commit()
     db.refresh(record)
+    audit.record_event(db, record, "WITHDRAWN", user)
     await manager.notify_application("application.updated", serialize(record))
     return serialize(record, full=True)
 

@@ -18,6 +18,22 @@ backend/       FastAPI API + WebSocket server
    everything else goes to the **officer review queue**.
 6. When an officer approves or rejects, the **applicant sees it immediately** (WebSocket push).
 
+## AI insights
+
+- **Path to approval.** For any application that would not be auto-approved, the AI finds the
+  *smallest single change* that would get it approved: borrow less, choose a longer tenure, clear
+  existing EMIs, add a co-applicant's income, or raise the credit score. Each suggestion shows its
+  new risk score and EMI, and one tap applies it in the live what-if screen. Approved applicants
+  see their **approval headroom**, the largest loan still approved on the same terms. Every
+  suggestion is re-checked with the real pipeline, so the advice never contradicts the decision.
+  Fraud-flagged applications get no coaching.
+- **Tamper-evident audit trail.** Every submission, review and withdrawal is sealed into a
+  SHA-256 hash chain (each event's hash covers the previous one). Editing or deleting any past
+  record breaks the chain, and the app shows it. Each report shows its own sealed history.
+- **Model health monitoring.** Officers see whether recent applicants still look like the data the
+  model was trained on, using the Population Stability Index per feature (under 0.10 stable, over
+  0.25 drifted: retrain).
+
 ## Run locally
 
 ### Backend
@@ -137,6 +153,10 @@ against the current model and only replaces it if it scores at least as well (`-
 | PATCH | `/applications/{id}/review` | Officer approves / rejects (pushed live) |
 | POST | `/applications/{id}/withdraw` | Applicant withdraws a pending application |
 | GET | `/applications/export` | Officer CSV export (same filters as the list) |
+| POST | `/advice` | Path to approval / approval headroom (not saved) |
+| GET | `/applications/{id}/audit` | Hash-chained audit trail of one application |
+| GET | `/audit/verify` | Officer: re-verify the whole audit ledger |
+| GET | `/model/health` | Officer: data drift (PSI) vs. training data |
 | GET | `/stats` | Dashboard KPIs, risk mix, 14-day trend |
 | GET | `/model` | Model algorithm and held-out test metrics |
 | WS | `/ws` | Live events; first message `{"type":"auth","token":"…"}` |
