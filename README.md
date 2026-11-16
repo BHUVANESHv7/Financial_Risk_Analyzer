@@ -43,7 +43,6 @@ cd backend
 python -m venv venv
 venv\Scripts\activate            # macOS/Linux: source venv/bin/activate
 pip install -r requirements.txt
-python -m spacy download en_core_web_sm
 copy .env.example .env           # then edit SECRET_KEY etc.
 python seed_final.py --demo      # demo users + sample applications
 uvicorn main:app --reload --port 8000

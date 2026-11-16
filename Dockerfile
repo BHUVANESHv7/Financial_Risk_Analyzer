@@ -34,15 +34,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 COPY backend/requirements.txt .
-RUN pip install -r requirements.txt \
-    && python -m spacy download en_core_web_sm
+RUN pip install -r requirements.txt
 
 COPY backend/ .
 COPY --from=web /src/build/web ./web
 
 # Load the ML model at build time (fails the build if it is broken).
 RUN SECRET_KEY=build-only-secret-not-used-at-runtime ENV=development \
-    python -c "from risk_model import get_model, predict_risk; get_model(); print(predict_risk({'monthly_income': 50000, 'loan_amount': 300000})['risk_level'])"
+    python -c "import spacy; spacy.load('en_core_web_sm'); from risk_model import get_model, predict_risk; get_model(); print(predict_risk({'monthly_income': 50000, 'loan_amount': 300000})['risk_level'])"
 
 # Run as an unprivileged user.
 RUN useradd --create-home --uid 1000 app && chown -R app:app /app
