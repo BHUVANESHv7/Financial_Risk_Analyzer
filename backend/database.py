@@ -28,7 +28,11 @@ def _connect(url: str, attempts: int):
     kwargs = {"connect_args": {"check_same_thread": False}} if is_sqlite else {
         "pool_pre_ping": True, "pool_recycle": 300, "pool_size": 5, "max_overflow": 10,
     }
-    eng = create_engine(url, **kwargs)
+    try:
+        eng = create_engine(url, **kwargs)
+    except Exception as e:  # noqa: BLE001 — e.g. database driver not installed
+        print(f"[DB] Cannot use {url.split(':', 1)[0]}: {type(e).__name__}: {e}")
+        return None
     for attempt in range(1, attempts + 1):
         try:
             with eng.connect():

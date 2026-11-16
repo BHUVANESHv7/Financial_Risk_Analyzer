@@ -17,9 +17,22 @@ load_dotenv()
 #   2. MySQL built from DB_HOST / DB_USER / ... (original setup)
 #   3. Local SQLite file (automatic fallback when MySQL is unreachable)
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
-# Heroku/Render style "postgres://" URLs are not accepted by SQLAlchemy 2.
-if DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = "postgresql://" + DATABASE_URL[len("postgres://"):]
+
+def _with_driver(url: str) -> str:
+    """
+    Name the installed driver explicitly. Hosting platforms hand out
+    "postgres://" / "postgresql://" URLs, but SQLAlchemy 2.1 maps a bare
+    "postgresql://" to psycopg 3, while this app ships psycopg2.
+    """
+    for prefix in ("postgres://", "postgresql://"):
+        if url.startswith(prefix):
+            return "postgresql+psycopg2://" + url[len(prefix):]
+    if url.startswith("mysql://"):
+        return "mysql+pymysql://" + url[len("mysql://"):]
+    return url
+
+
+DATABASE_URL = _with_driver(DATABASE_URL)
 DB_HOST = os.getenv("DB_HOST", "")
 DB_PORT = os.getenv("DB_PORT", "3306")
 DB_USER = os.getenv("DB_USER", "root")

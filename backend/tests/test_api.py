@@ -501,3 +501,12 @@ def test_corrupt_pdf_upload_gives_friendly_error(client, applicant):
                     headers=applicant)
     assert r.status_code == 422
     assert "detail" in r.json()
+
+
+def test_database_urls_get_an_explicit_driver():
+    from config import _with_driver
+    assert _with_driver("postgres://u:p@h:5432/db") == "postgresql+psycopg2://u:p@h:5432/db"
+    assert _with_driver("postgresql://u:p@h/db") == "postgresql+psycopg2://u:p@h/db"
+    assert _with_driver("postgresql+psycopg2://u@h/db") == "postgresql+psycopg2://u@h/db"
+    assert _with_driver("mysql://u:p@h/db") == "mysql+pymysql://u:p@h/db"
+    assert _with_driver("sqlite:///x.db") == "sqlite:///x.db"
