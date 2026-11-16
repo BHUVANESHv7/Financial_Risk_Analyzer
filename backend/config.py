@@ -17,6 +17,9 @@ load_dotenv()
 #   2. MySQL built from DB_HOST / DB_USER / ... (original setup)
 #   3. Local SQLite file (automatic fallback when MySQL is unreachable)
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+# Heroku/Render style "postgres://" URLs are not accepted by SQLAlchemy 2.
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = "postgresql://" + DATABASE_URL[len("postgres://"):]
 DB_HOST = os.getenv("DB_HOST", "")
 DB_PORT = os.getenv("DB_PORT", "3306")
 DB_USER = os.getenv("DB_USER", "root")
@@ -44,6 +47,14 @@ if SECRET_KEY == _DEV_SECRET or len(SECRET_KEY) < 16:
     if IS_PRODUCTION:
         raise RuntimeError("SECRET_KEY must be set to a long random value in production.")
     warnings.warn("SECRET_KEY is not set — using an insecure development key.")
+
+# Interactive API docs (/docs, /redoc). Off by default in production.
+ENABLE_DOCS = os.getenv("ENABLE_DOCS", "false" if IS_PRODUCTION else "true").lower() in ("1", "true", "yes")
+
+# ── Web app ───────────────────────────────────────────────────────────────────
+# Folder with the built Flutter web app (flutter build web). When it exists the
+# API also serves the web app, so the whole product is a single service/URL.
+WEB_DIR = os.getenv("WEB_DIR", os.path.join(_HERE, "..", "flutter_app", "build", "web"))
 
 # ── Uploads ───────────────────────────────────────────────────────────────────
 MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", 10))

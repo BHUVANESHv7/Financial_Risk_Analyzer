@@ -29,11 +29,12 @@ from fastapi import (
     Depends, FastAPI, File, HTTPException, Query, Request, UploadFile, WebSocket,
     WebSocketDisconnect, status,
 )
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response
+from fastapi.staticfiles import StaticFiles
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordRequestForm
-from sqlalchemy import func, or_
+from sqlalchemy import func, or_, text
 from sqlalchemy.orm import Session
 
 import audit
@@ -66,6 +67,9 @@ app = FastAPI(
     description="Loan risk assessment API using NLP + ML, with live updates",
     version="2.0.0",
     lifespan=lifespan,
+    docs_url="/docs" if config.ENABLE_DOCS else None,
+    redoc_url="/redoc" if config.ENABLE_DOCS else None,
+    openapi_url="/openapi.json" if config.ENABLE_DOCS else None,
 )
 
 app.add_middleware(
@@ -83,6 +87,16 @@ async def add_security_headers(request: Request, call_next):
     for key, value in SECURITY_HEADERS.items():
         response.headers.setdefault(key, value)
     return response
+
+
+@app.exception_handler(Exception)
+async def unhandled_error(request: Request, exc: Exception):
+    """Log unexpected errors server-side; never leak a stack trace to clients."""
+    import traceback
+    print(f"[ERROR] {request.method} {request.url.path}: {type(exc).__name__}: {exc}")
+    traceback.print_exc()
+    return JSONResponse(status_code=500,
+                        content={"detail": "Something went wrong on our side. Please try again."})
 
 
 def _client_ip(request: Request) -> str:
@@ -138,13 +152,23 @@ def _status_for(decision: str) -> str:
 
 @app.get("/health")
 def health():
-    return {
-        "status": "online",
+    """Liveness + database check, used by Docker / Render health checks."""
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        db_ok = True
+    except Exception:  # noqa: BLE001
+        db_ok = False
+    body = {
+        "status": "online" if db_ok else "degraded",
+        "database_ok": db_ok,
         "service": "AI Loan Risk Analyzer",
         "database": engine.url.get_backend_name(),
         "model_version": MODEL_VERSION,
         "live_connections": manager.count,
+        "web_app": _web_dir is not None,
     }
+    return body if db_ok else JSONResponse(status_code=503, content=body)
 
 
 @app.get("/model")
@@ -605,3 +629,30 @@ async def websocket_endpoint(ws: WebSocket):
         pass
     finally:
         await manager.disconnect(client)
+
+
+# ── Web app (single-service deployment) ───────────────────────────────────────
+
+class _WebFiles(StaticFiles):
+    """
+    Serves the built Flutter web app. Flutter's file names are not content-hashed,
+    so browsers must revalidate (cheap 304s via ETag) to pick up new releases.
+    """
+
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
+def _find_web_dir():
+    path = os.path.abspath(config.WEB_DIR)
+    return path if os.path.isfile(os.path.join(path, "index.html")) else None
+
+
+_web_dir = _find_web_dir()
+if _web_dir:
+    # Mounted last, so every API route above takes priority.
+    app.mount("/", _WebFiles(directory=_web_dir, html=True), name="web")
+    print(f"[WEB] Serving web app from {_web_dir}")
+

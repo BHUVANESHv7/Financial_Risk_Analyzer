@@ -9,7 +9,15 @@ import sys
 import tempfile
 
 _DB = os.path.join(tempfile.mkdtemp(), "test.db")
-os.environ["DATABASE_URL"] = f"sqlite:///{_DB}"
+# CI also runs the suite against PostgreSQL via TEST_DATABASE_URL.
+os.environ["DATABASE_URL"] = os.getenv("TEST_DATABASE_URL") or f"sqlite:///{_DB}"
+# A fake built web app, to test single-service serving.
+_WEB = tempfile.mkdtemp()
+with open(os.path.join(_WEB, "index.html"), "w") as fh:
+    fh.write("<!DOCTYPE html><title>AI Loan Risk Analyzer</title>")
+with open(os.path.join(_WEB, "main.dart.js"), "w") as fh:
+    fh.write("console.log('app')")
+os.environ["WEB_DIR"] = _WEB
 os.environ["ADMIN_INVITE_CODE"] = "officer-code"
 os.environ["SECRET_KEY"] = "test-secret"
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -395,3 +403,101 @@ def test_psi_is_zero_for_identical_distributions():
     p = np.full(10, 0.1)
     assert psi(p, p) == 0
     assert psi(p, np.array([0.5] + [0.5 / 9] * 9)) > 0.25
+
+
+# ── Deployment ────────────────────────────────────────────────────────────────
+
+def test_web_app_served_alongside_api(client):
+    r = client.get("/")
+    assert r.status_code == 200 and "AI Loan Risk Analyzer" in r.text
+    assert r.headers["cache-control"] == "no-cache"          # new releases picked up
+    assert client.get("/main.dart.js").status_code == 200
+    # API routes still win over the web app.
+    h = client.get("/health")
+    assert h.headers["content-type"].startswith("application/json")
+    assert h.json()["database_ok"] is True and h.json()["web_app"] is True
+    assert client.get("/applications").status_code == 401
+    assert client.get("/no-such-file.js").status_code == 404
+
+
+def test_camera_allowed_for_document_scan(client):
+    assert "camera=(self)" in client.get("/health").headers["permissions-policy"]
+
+
+def test_seed_refuses_demo_accounts_in_production():
+    import subprocess
+    env = {**os.environ, "ENV": "production", "SECRET_KEY": "x" * 40}
+    backend = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    r = subprocess.run([sys.executable, "seed_final.py"], cwd=backend, env=env,
+                       capture_output=True, text=True, timeout=120)
+    assert r.returncode != 0 and "Refusing" in (r.stdout + r.stderr)
+
+
+def test_audit_numbers_are_canonical():
+    from audit import _canon
+    assert _canon(300000.0) == 300000 and isinstance(_canon(300000.0), int)
+    assert _canon(16.123456) == 16.1235
+    assert _canon(True) is True and _canon(None) is None and _canon("x") == "x"
+
+
+# ── Edge cases ────────────────────────────────────────────────────────────────
+
+EDGE_CASES = [
+    {"monthly_income": 0, "loan_amount": 0},
+    {"monthly_income": 0, "loan_amount": 500000},
+    {"monthly_income": 50000, "loan_amount": 0},
+    {"monthly_income": 100_000_000, "loan_amount": 10_000_000_000, "existing_emis": 100_000_000,
+     "employment_years": 60, "credit_score": 900, "num_dependents": 20, "tenure_months": 360,
+     "interest_rate": 40},
+    {"monthly_income": 1, "loan_amount": 1, "credit_score": 300, "tenure_months": 3,
+     "interest_rate": 0, "employment_years": 0, "num_dependents": 0},
+    {"monthly_income": 30000, "loan_amount": 800000, "existing_emis": 30000},
+    {"monthly_income": 45000, "loan_amount": 600000, "loan_category": "Not a category"},
+]
+
+
+@pytest.mark.parametrize("features", EDGE_CASES)
+def test_extreme_inputs_never_crash(client, applicant, features):
+    for path in ("/recalculate", "/advice"):
+        r = client.post(path, json=features, headers=applicant)
+        assert r.status_code == 200, (path, features, r.text)
+    body = client.post("/recalculate", json=features, headers=applicant).json()
+    assert 0 <= body["risk_score"] <= 100
+    assert body["decision"] in ("APPROVE", "REJECT", "MANUAL REVIEW")
+
+
+@pytest.mark.parametrize("bad", [
+    {"monthly_income": -1, "loan_amount": 1000},
+    {"monthly_income": 1000, "loan_amount": 1000, "credit_score": 1200},
+    {"monthly_income": 1000, "loan_amount": 1000, "tenure_months": 0},
+    {"monthly_income": "lots", "loan_amount": 1000},
+    {"loan_amount": 1000},
+])
+def test_invalid_inputs_rejected_cleanly(client, applicant, bad):
+    for path in ("/recalculate", "/advice", "/applications"):
+        r = client.post(path, json=bad, headers=applicant)
+        assert r.status_code == 422, (path, r.text)
+        assert isinstance(r.json()["detail"], list)
+
+
+def test_malformed_requests(client, applicant):
+    assert client.post("/recalculate", content=b"not json", headers={
+        **applicant, "Content-Type": "application/json"}).status_code == 422
+    assert client.get("/applications/999999", headers=applicant).status_code == 404
+    assert client.get("/applications/999999/audit", headers=applicant).status_code == 404
+    assert client.get("/applications/abc", headers=applicant).status_code == 422
+    assert client.get("/me", headers={"Authorization": "Bearer garbage"}).status_code == 401
+    assert client.post("/login", data={"username": "nobody@x.com", "password": ""}).status_code in (401, 422)
+
+
+def test_empty_upload_rejected(client, applicant):
+    r = client.post("/analyze-loan", files={"file": ("slip.pdf", b"", "application/pdf")},
+                    headers=applicant)
+    assert r.status_code == 400
+
+
+def test_corrupt_pdf_upload_gives_friendly_error(client, applicant):
+    r = client.post("/analyze-loan", files={"file": ("slip.pdf", b"%PDF-1.4 garbage", "application/pdf")},
+                    headers=applicant)
+    assert r.status_code == 422
+    assert "detail" in r.json()

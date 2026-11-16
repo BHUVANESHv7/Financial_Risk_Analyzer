@@ -1,37 +1,40 @@
-# Backend + MySQL for local development or a single server.
-#   docker compose up --build
-# Then seed demo data:
-#   docker compose exec api python seed_final.py --demo
+# The whole product (API + web app) with PostgreSQL, on one machine.
+#
+#   1. Create a .env file next to this one:
+#        SECRET_KEY=<python -c "import secrets; print(secrets.token_hex(32))">
+#        ADMIN_INVITE_CODE=<a code for officer sign-up>
+#        POSTGRES_PASSWORD=<a strong password>
+#   2. docker compose up -d --build
+#   3. Open http://localhost:8000
 services:
   db:
-    image: mysql:8.0
+    image: postgres:16-alpine
     restart: unless-stopped
     environment:
-      MYSQL_DATABASE: loan_analyzer
-      MYSQL_USER: loan
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-change-me}
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-change-me-too}
+      POSTGRES_DB: loan_analyzer
+      POSTGRES_USER: loan
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
     volumes:
-      - db_data:/var/lib/mysql
+      - db_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1"]
-      interval: 10s
+      test: ["CMD-SHELL", "pg_isready -U loan -d loan_analyzer"]
+      interval: 5s
       timeout: 5s
-      retries: 10
+      retries: 20
 
-  api:
-    build: ./backend
+  app:
+    build: .
     restart: unless-stopped
     depends_on:
       db:
         condition: service_healthy
     environment:
-      DATABASE_URL: mysql+pymysql://loan:${MYSQL_PASSWORD:-change-me}@db:3306/loan_analyzer
-      SECRET_KEY: ${SECRET_KEY:?Set SECRET_KEY in your shell or a .env file next to this compose file}
+      ENV: production
+      DATABASE_URL: postgresql://loan:${POSTGRES_PASSWORD}@db:5432/loan_analyzer
+      SECRET_KEY: ${SECRET_KEY:?Set SECRET_KEY in .env}
       ADMIN_INVITE_CODE: ${ADMIN_INVITE_CODE:-}
-      CORS_ORIGINS: ${CORS_ORIGINS:-*}
     ports:
-      - "8000:8000"
+      - "${APP_PORT:-8000}:8000"
 
 volumes:
   db_data:

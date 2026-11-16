@@ -7,6 +7,7 @@ Connects to DATABASE_URL, else MySQL, else falls back to a local SQLite file
 so the app always starts in development.
 """
 
+import time
 from datetime import datetime, timezone
 
 from sqlalchemy import (
@@ -22,31 +23,47 @@ def _utcnow():
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
-def _make_engine():
-    candidates = []
-    if config.DATABASE_URL:
-        candidates.append(config.DATABASE_URL)
-    elif config.DB_HOST:
-        candidates.append(
-            f"mysql+pymysql://{config.DB_USER}:{config.DB_PASS}"
-            f"@{config.DB_HOST}:{config.DB_PORT}/{config.DB_NAME}"
-        )
-    candidates.append(config.SQLITE_URL)
-
-    for url in candidates:
-        is_sqlite = url.startswith("sqlite")
-        kwargs = {"connect_args": {"check_same_thread": False}} if is_sqlite else {
-            "pool_pre_ping": True, "pool_recycle": 300,
-        }
-        eng = create_engine(url, **kwargs)
+def _connect(url: str, attempts: int):
+    is_sqlite = url.startswith("sqlite")
+    kwargs = {"connect_args": {"check_same_thread": False}} if is_sqlite else {
+        "pool_pre_ping": True, "pool_recycle": 300, "pool_size": 5, "max_overflow": 10,
+    }
+    eng = create_engine(url, **kwargs)
+    for attempt in range(1, attempts + 1):
         try:
             with eng.connect():
                 pass
             print(f"[DB] Connected using {eng.url.get_backend_name()}")
             return eng
         except Exception as e:  # noqa: BLE001
-            print(f"[DB] Could not connect to {eng.url.get_backend_name()}: {e}")
-    raise RuntimeError("No database available")
+            print(f"[DB] Could not connect to {eng.url.get_backend_name()} "
+                  f"(attempt {attempt}/{attempts}): {type(e).__name__}")
+            if attempt < attempts:
+                time.sleep(min(2 * attempt, 10))
+    return None
+
+
+def _make_engine():
+    configured = config.DATABASE_URL or (
+        f"mysql+pymysql://{config.DB_USER}:{config.DB_PASS}"
+        f"@{config.DB_HOST}:{config.DB_PORT}/{config.DB_NAME}" if config.DB_HOST else ""
+    )
+    if configured:
+        # In production a configured database must be used: silently switching to a
+        # local SQLite file would lose data. Retry while the database starts up.
+        eng = _connect(configured, attempts=8 if config.IS_PRODUCTION else 1)
+        if eng is not None:
+            return eng
+        if config.IS_PRODUCTION:
+            raise RuntimeError("The configured database is unreachable.")
+        print("[DB] Falling back to local SQLite (development only).")
+    elif config.IS_PRODUCTION:
+        print("[DB] WARNING: no DATABASE_URL set — using SQLite. Data is lost if the "
+              "server's disk is not persistent.")
+    eng = _connect(config.SQLITE_URL, attempts=1)
+    if eng is None:
+        raise RuntimeError("No database available")
+    return eng
 
 
 engine = _make_engine()

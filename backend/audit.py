@@ -47,9 +47,21 @@ def _event_hash(e: AuditEvent) -> str:
     return compute_hash(e.prev_hash, e.application_id, e.actor_email, e.action, e.data, e.timestamp)
 
 
+def _canon(value):
+    """
+    Store numbers in one canonical form (whole floats as ints, others rounded),
+    so the hash is identical after a round trip through any database's JSON type.
+    """
+    if isinstance(value, bool) or value is None:
+        return value
+    if isinstance(value, float):
+        return int(value) if value.is_integer() else round(value, 4)
+    return value
+
+
 def snapshot(record: LoanAnalysis) -> dict:
     """The facts worth proving later: what was decided, on what numbers."""
-    return {
+    return {k: _canon(v) for k, v in {
         "status": record.status,
         "decision": record.decision,
         "risk_level": record.risk_level,
@@ -59,7 +71,7 @@ def snapshot(record: LoanAnalysis) -> dict:
         "credit_score": record.credit_score,
         "fraud_flag": bool(record.fraud_flag),
         "notes": record.reviewer_notes,
-    }
+    }.items()}
 
 
 def record_event(db: Session, record: LoanAnalysis, action: str, actor=None,

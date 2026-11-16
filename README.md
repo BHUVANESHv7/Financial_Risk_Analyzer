@@ -74,13 +74,11 @@ flutter run --dart-define=API_URL=http://192.168.1.10:8000
 
 Defaults: web → `http://127.0.0.1:8000`, Android emulator → `http://10.0.2.2:8000`.
 
-### Docker (backend + MySQL)
+### Deploy (Docker / Render)
 
-```bash
-set SECRET_KEY=your-long-random-secret      # macOS/Linux: export SECRET_KEY=...
-docker compose up --build
-docker compose exec api python seed_final.py --demo
-```
+One Docker image contains the API **and** the web app (single URL). See **[DEPLOY.md](DEPLOY.md)**
+for Render (one-click blueprint), any Docker server (`docker compose up -d --build` with
+PostgreSQL) and other platforms.
 
 ### Tests
 
@@ -89,7 +87,8 @@ cd backend && venv\Scripts\python -m pytest -q     # API, model, security
 cd flutter_app && flutter test                      # models, live updates, widgets
 ```
 
-GitHub Actions runs both suites, `flutter analyze` and a web build on every push.
+GitHub Actions runs the backend suite on SQLite **and** PostgreSQL, `flutter analyze`, the Flutter
+tests, then builds the production Docker image and smoke-tests it end to end.
 
 ## Security & safeguards
 

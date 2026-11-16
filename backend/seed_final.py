@@ -3,6 +3,7 @@ Seed demo accounts (and optionally sample applications).
 
     python seed_final.py            # demo users only
     python seed_final.py --demo     # demo users + ~25 sample applications
+Refuses to run in production (ENV=production) unless --force is given.
 """
 
 import random
@@ -21,6 +22,13 @@ DEMO_USERS = [
 
 NAMES = ["Ravi Kumar", "Priya Sharma", "Arjun Mehta", "Ananya Iyer", "Vikram Singh",
          "Sneha Reddy", "Rahul Verma", "Kavya Nair", "Aditya Rao", "Meera Pillai"]
+
+
+def _refuse_in_production():
+    import config
+    if config.IS_PRODUCTION and "--force" not in sys.argv:
+        sys.exit("[SEED] Refusing to create demo accounts with known passwords in production. "
+                 "Register real accounts instead (officers need ADMIN_INVITE_CODE).")
 
 
 def seed_users(db):
@@ -78,12 +86,15 @@ def seed_applications(db, n=25):
 
 
 if __name__ == "__main__":
+    _refuse_in_production()
     init_db()
     session = SessionLocal()
     try:
         seed_users(session)
         if "--demo" in sys.argv:
             seed_applications(session)
+            import audit
+            audit.backfill(session)  # seal the sample applications into the audit ledger
         print("[SUCCESS] Seeding complete.")
     finally:
         session.close()
